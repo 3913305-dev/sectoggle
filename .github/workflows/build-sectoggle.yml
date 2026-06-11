@@ -20,7 +20,7 @@ jobs:
           head -12 SecToggle.m
           xcrun -sdk iphoneos clang -arch arm64 \
             -Wno-deprecated-declarations \
-            -dynamiclib -fobjc-arc -fmodules \
+            -dynamiclib -fobjc-arc \
             -framework UIKit -framework Foundation -framework CoreLocation \
             -install_name @executable_path/SecToggle.dylib \
             -o SecToggle.dylib SecToggle.m \

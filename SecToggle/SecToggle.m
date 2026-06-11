@@ -4,17 +4,10 @@
  * 授权安全测试用途
  */
 
-@import UIKit;
-@import Foundation;
-@import CoreLocation;
-
-typedef struct objc_method *Method;
-typedef struct objc_selector *SEL;
-typedef id (*IMP)(id, SEL, ...);
-Method class_getInstanceMethod(Class cls, SEL name);
-Method class_getClassMethod(Class cls, SEL name);
-IMP method_getImplementation(Method m);
-void method_setImplementation(Method m, IMP imp);
+#import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
+#import <CoreLocation/CoreLocation.h>
+#import <objc/runtime.h>
 
 void SecUpdateStatusLabel(void);
 
@@ -275,19 +268,19 @@ static void SecInstallHooks(void) {
 
     Method m1 = class_getInstanceMethod([CLLocation class], @selector(coordinate));
     if (m1) {
-        orig_coord = (void *)method_getImplementation(m1);
+        orig_coord = (CLLocationCoordinate2D (*)(id, SEL))method_getImplementation(m1);
         method_setImplementation(m1, (IMP)hook_coord);
     }
 
     Method m2 = class_getInstanceMethod([NSMutableURLRequest class], @selector(setHTTPBody:));
     if (m2) {
-        orig_setBody = (void *)method_getImplementation(m2);
+        orig_setBody = (void (*)(id, SEL, NSData *))method_getImplementation(m2);
         method_setImplementation(m2, (IMP)hook_setBody);
     }
 
     Method m3 = class_getClassMethod([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:));
     if (m3) {
-        orig_jsonData = (void *)method_getImplementation(m3);
+        orig_jsonData = (id (*)(id, SEL, NSData *, NSJSONReadingOptions, NSError **))method_getImplementation(m3);
         method_setImplementation(m3, (IMP)hook_jsonData);
     }
 
