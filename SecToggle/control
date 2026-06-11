@@ -1,0 +1,8 @@
+Package: com.securitytest.sectoggle
+Name: SecToggle
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 授权安全测试 — 中邮司机帮悬浮远程到达开关
+Maintainer: security-test
+Author: security-test
+Section: Tweaks
