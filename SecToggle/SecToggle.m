@@ -7,7 +7,14 @@
 @import UIKit;
 @import Foundation;
 @import CoreLocation;
-@import ObjectiveC;
+
+typedef struct objc_method *Method;
+typedef struct objc_selector *SEL;
+typedef id (*IMP)(id, SEL, ...);
+Method class_getInstanceMethod(Class cls, SEL name);
+Method class_getClassMethod(Class cls, SEL name);
+IMP method_getImplementation(Method m);
+void method_setImplementation(Method m, IMP imp);
 
 void SecUpdateStatusLabel(void);
 

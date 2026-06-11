@@ -13,40 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fix broken #import lines (GitHub web upload strips angle brackets)
-        run: |
-          cd SecToggle
-          python3 << 'PY'
-          path = "SecToggle.m"
-          expected = [
-              "@import UIKit;",
-              "@import Foundation;",
-              "@import CoreLocation;",
-              "@import ObjectiveC;",
-          ]
-          with open(path, "r", encoding="utf-8") as f:
-              lines = f.readlines()
-          out, idx = [], 0
-          for line in lines:
-              s = line.strip()
-              if s == "#import" or (s.startswith("#import") and "<" not in line):
-                  if idx < len(expected):
-                      out.append(expected[idx] + "\n")
-                      idx += 1
-                      continue
-              out.append(line)
-          if idx:
-              with open(path, "w", encoding="utf-8") as f:
-                  f.writelines(out)
-              print(f"Fixed {idx} broken #import line(s)")
-          else:
-              print("Imports OK")
-          head -12 SecToggle.m
-          PY
-
       - name: Build SecToggle.dylib
         run: |
           cd SecToggle
+          echo "=== source head ==="
+          head -12 SecToggle.m
           xcrun -sdk iphoneos clang -arch arm64 \
             -Wno-deprecated-declarations \
             -dynamiclib -fobjc-arc -fmodules \
