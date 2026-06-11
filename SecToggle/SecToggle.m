@@ -130,7 +130,9 @@ static void SecCreatePanel(void) {
         if (!w.hidden && w.alpha > 0) { win = w; break; }
     }
     if (!win) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2*NSEC_PER_SEC), dispatch_get_main_queue(), SecCreatePanel);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            SecCreatePanel();
+        });
         return;
     }
 
@@ -293,6 +295,8 @@ __attribute__((constructor))
 static void SecToggleEntry(void) {
     SecInstallHooks();
     dispatch_async(dispatch_get_main_queue(), ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5*NSEC_PER_SEC), dispatch_get_main_queue(), SecCreatePanel);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            SecCreatePanel();
+        });
     });
 }
