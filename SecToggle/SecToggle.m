@@ -4,10 +4,10 @@
  * 授权安全测试用途
  */
 
-#import <UIKit/UIKit.h>
-#import <Foundation/Foundation.h>
-#import <CoreLocation/CoreLocation.h>
-#import <objc/runtime.h>
+@import UIKit;
+@import Foundation;
+@import CoreLocation;
+@import ObjectiveC;
 
 void SecUpdateStatusLabel(void);
 
