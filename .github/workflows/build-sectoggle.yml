@@ -18,13 +18,15 @@ jobs:
           cd SecToggle
           echo "=== source head ==="
           head -12 SecToggle.m
+          set -e
           xcrun -sdk iphoneos clang -arch arm64 \
             -Wno-deprecated-declarations \
+            -Wno-incompatible-function-pointer-types \
             -dynamiclib -fobjc-arc \
             -framework UIKit -framework Foundation -framework CoreLocation \
             -install_name @executable_path/SecToggle.dylib \
             -o SecToggle.dylib SecToggle.m \
-            -miphoneos-version-min=13.0
+            -miphoneos-version-min=13.0 2>&1 | tee build.log || (cat build.log; exit 1)
           file SecToggle.dylib
           ls -la SecToggle.dylib
 

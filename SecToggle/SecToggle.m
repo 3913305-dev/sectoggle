@@ -269,19 +269,19 @@ static void SecInstallHooks(void) {
     Method m1 = class_getInstanceMethod([CLLocation class], @selector(coordinate));
     if (m1) {
         orig_coord = (CLLocationCoordinate2D (*)(id, SEL))method_getImplementation(m1);
-        method_setImplementation(m1, (IMP)hook_coord);
+        method_setImplementation(m1, (IMP)(void *)hook_coord);
     }
 
     Method m2 = class_getInstanceMethod([NSMutableURLRequest class], @selector(setHTTPBody:));
     if (m2) {
         orig_setBody = (void (*)(id, SEL, NSData *))method_getImplementation(m2);
-        method_setImplementation(m2, (IMP)hook_setBody);
+        method_setImplementation(m2, (IMP)(void *)hook_setBody);
     }
 
     Method m3 = class_getClassMethod([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:));
     if (m3) {
         orig_jsonData = (id (*)(id, SEL, NSData *, NSJSONReadingOptions, NSError **))method_getImplementation(m3);
-        method_setImplementation(m3, (IMP)hook_jsonData);
+        method_setImplementation(m3, (IMP)(void *)hook_jsonData);
     }
 
     NSLog(@"[SecToggle] Hooks 安装完成");
