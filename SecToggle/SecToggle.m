@@ -9,10 +9,20 @@
 #import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
 
+void SecUpdateStatusLabel(void);
+
+@interface SecToggleHandler : NSObject
++ (instancetype)shared;
+- (void)onToggle:(UISwitch *)sender;
+- (void)onNext:(id)sender;
+- (void)onArrive:(id)sender;
+- (void)onPan:(UIPanGestureRecognizer *)g;
+@end
+
 #pragma mark - 状态
 
 static BOOL g_enabled = NO;
-static NSMutableArray *g_stations = nil; // @{@"zddm",@"name",@"jd",@"wd"}
+static NSMutableArray *g_stations = nil;
 static NSInteger g_stationIndex = 0;
 static UIView *g_panel = nil;
 static UILabel *g_statusLabel = nil;
@@ -52,7 +62,6 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
                                     @"jd":@(lon), @"wd":@(lat)}];
             NSLog(@"[SecToggle] 站点 %@ %@ wd=%f jd=%f", zddm, name, lat, lon);
             dispatch_async(dispatch_get_main_queue(), ^{
-                extern void SecUpdateStatusLabel(void);
                 SecUpdateStatusLabel();
             });
         }
@@ -172,14 +181,6 @@ static void SecCreatePanel(void) {
     [win bringSubviewToFront:g_panel];
     NSLog(@"[SecToggle] 悬浮窗已显示");
 }
-
-@interface SecToggleHandler : NSObject
-+ (instancetype)shared;
-- (void)onToggle:(UISwitch *)sender;
-- (void)onNext:(id)sender;
-- (void)onArrive:(id)sender;
-- (void)onPan:(UIPanGestureRecognizer *)g;
-@end
 
 @implementation SecToggleHandler {
     CGPoint _panStart;
