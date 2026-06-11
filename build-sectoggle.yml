@@ -1,0 +1,32 @@
+name: Build SecToggle.dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'SecToggle/**'
+      - '.github/workflows/build-sectoggle.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build SecToggle.dylib
+        run: |
+          cd SecToggle
+          xcrun -sdk iphoneos clang -arch arm64 \
+            -dynamiclib -fobjc-arc \
+            -framework UIKit -framework Foundation -framework CoreLocation \
+            -install_name @executable_path/SecToggle.dylib \
+            -o SecToggle.dylib SecToggle.m \
+            -miphoneos-version-min=13.0
+          file SecToggle.dylib
+          ls -la SecToggle.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SecToggle.dylib
+          path: SecToggle/SecToggle.dylib
+          retention-days: 30
