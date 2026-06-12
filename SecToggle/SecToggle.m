@@ -1656,17 +1656,7 @@ static void SecApplyPlateToViewHierarchy(UIView *view, NSString *plate, NSIntege
     }
 }
 
-static void SecApplyPlateToVisibleCells(UIViewController *vc, NSString *plate) {
-    if (!vc || !plate.length) return;
-    for (UIView *sub in vc.view.subviews) {
-        if (![sub isKindOfClass:[UITableView class]]) continue;
-        UITableView *tv = (UITableView *)sub;
-        for (UITableViewCell *cell in tv.visibleCells) {
-            SecApplyPlateToUI(cell, plate);
-            SecApplyPlateToViewHierarchy(cell.contentView, plate, 0);
-        }
-    }
-}
+static void SecApplyPlateToVisibleCells(UIViewController *vc, NSString *plate);
 
 static void SecApplyPlateToUI(id obj, NSString *plate) {
     if (!obj || !plate.length) return;
@@ -1691,6 +1681,17 @@ static void SecApplyPlateToUI(id obj, NSString *plate) {
         SecApplyPlateToVisibleCells(vc, plate);
     } else if ([obj isKindOfClass:[UIView class]]) {
         SecApplyPlateToViewHierarchy((UIView *)obj, plate, 0);
+    }
+}
+
+static void SecApplyPlateToVisibleCells(UIViewController *vc, NSString *plate) {
+    if (!vc || !plate.length) return;
+    for (UIView *sub in vc.view.subviews) {
+        if (![sub isKindOfClass:[UITableView class]]) continue;
+        UITableView *tv = (UITableView *)sub;
+        for (UITableViewCell *cell in tv.visibleCells) {
+            SecApplyPlateToUI(cell, plate);
+        }
     }
 }
 
