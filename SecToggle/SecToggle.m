@@ -24,9 +24,9 @@ static UIViewController *SecPlateCameraHostVC(UIViewController *cameraVC);
 static void SecInstallPlateHooks(void);
 static void SecInstallSigninHooks(void);
 static void SecInstallClockHooks(void);
-static void SecActivateClockFromObject(id obj);
 static void SecUpdateClockTargetFromObject(id obj, NSInteger depth);
 static void SecSetClockActive(BOOL active);
+static void SecDeactivateClock(void);
 static void SecPanelLog(NSString *format, ...);
 static void SecDebugLog(NSString *format, ...);
 static NSString *SecStationTitle(NSDictionary *t);
@@ -61,6 +61,7 @@ static BOOL SecShouldPatchRequestURL(NSString *url);
 static BOOL SecBodyLooksLikeGps(NSString *raw);
 static id SecKVCTry(id obj, NSString *key);
 static NSString *SecStringFromKV(id obj, NSArray *keys);
+static UIViewController *SecViewControllerForResponder(id obj);
 static NSString *SecScanHookKey(Class cls, SEL sel);
 static void SecEnsureUI(void);
 static void SecSetPanelVisible(BOOL visible);
@@ -127,6 +128,7 @@ static NSInteger g_gpsPulseIndex = 0;
 static NSMutableDictionary *g_clockTarget = nil;
 static BOOL g_clockActive = NO;
 static NSTimeInterval g_clockActiveUntil = 0;
+static __weak id g_clockPinnedView = nil;
 
 static NSMutableArray<NSArray *> *g_routePoints = nil;
 static NSMutableArray<NSNumber *> *g_routeLegEnds = nil;
@@ -232,15 +234,52 @@ static void SecUpdateClockTargetFromObject(id obj, NSInteger depth) {
     }
 }
 
+static Class SecSignActionViewClass(void) {
+    static Class cls;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cls = NSClassFromString(@"XPDSignActionView"); });
+    return cls;
+}
+
+static BOOL SecIsSignActionView(id obj) {
+    Class cls = SecSignActionViewClass();
+    return cls && obj && [obj isKindOfClass:cls];
+}
+
+static void SecDeactivateClock(void) {
+    if (!g_clockActive && !g_clockPinnedView) return;
+    g_clockActive = NO;
+    g_clockActiveUntil = 0;
+    g_clockPinnedView = nil;
+    SecRefreshFakeLocation();
+}
+
+static void SecPinClockView(id view) {
+    if (!SecIsSignActionView(view)) return;
+    g_clockPinnedView = view;
+    g_clockActive = YES;
+    g_clockActiveUntil = 0;
+}
+
 static void SecSetClockActive(BOOL active) {
-    g_clockActive = active;
-    g_clockActiveUntil = active ? [[NSDate date] timeIntervalSince1970] + 180.0 : 0;
+    if (!active) {
+        SecDeactivateClock();
+        return;
+    }
+    g_clockActive = YES;
+    g_clockActiveUntil = 0;
 }
 
 static BOOL SecClockIsActive(void) {
-    if (!g_clockActive) return NO;
-    if ([[NSDate date] timeIntervalSince1970] > g_clockActiveUntil) {
-        g_clockActive = NO;
+    if (!g_clockActive || !g_clockTarget.count) return NO;
+    id view = g_clockPinnedView;
+    if (!view || !SecIsSignActionView(view)) {
+        SecDeactivateClock();
+        return NO;
+    }
+    UIView *uv = (UIView *)view;
+    if (!uv.window || uv.hidden || uv.alpha < 0.01) {
+        SecDeactivateClock();
         return NO;
     }
     return YES;
@@ -1396,7 +1435,6 @@ static void hook_submitSingin(id self, SEL _cmd, id bcdh, id lat, id lon, id com
 static id hook_geofenceLocationError(id self, SEL _cmd, id location) {
     if (g_enabled) {
         SecBindActionStationFromObject(self);
-        if (!g_clockTarget.count) SecActivateClockFromObject(self);
         SecRefreshFakeLocation();
         return nil;
     }
@@ -1474,9 +1512,8 @@ static void SecHookClockSelector(Class cls, SEL sel, IMP hookImp) {
 }
 
 static id SecPatchClockInfo(id info) {
-    if (!g_enabled) return info;
-    NSDictionary *t = SecClockTarget() ?: g_clockTarget;
-    if (!t.count) return info;
+    if (!g_enabled || !g_clockTarget.count) return info;
+    NSDictionary *t = g_clockTarget;
     double wd = 0, jd = 0;
     SecSpoofedCoords(t, &wd, &jd, NO);
 
@@ -1500,39 +1537,52 @@ static id SecPatchClockInfo(id info) {
     return m;
 }
 
-static void SecActivateClockFromObject(id obj) {
-    if (!g_enabled || !obj) return;
-    SecUpdateClockTargetFromObject(obj, 0);
-    if (!g_clockTarget.count) return;
-    SecSetClockActive(YES);
-    SecRefreshFakeLocation();
-    SecPanelLog(@"考勤定位：%@", SecStationTitle(g_clockTarget));
-}
-
 static void hook_setPunchData(id self, SEL _cmd, id data) {
-    SecActivateClockFromObject(data);
-    if (data) SecActivateClockFromObject(self);
+    if (g_enabled) {
+        if (data) SecUpdateClockTargetFromObject(data, 0);
+        SecUpdateClockTargetFromObject(self, 0);
+        if (g_clockTarget.count && [(id)self window]) {
+            SecPinClockView(self);
+            SecRefreshFakeLocation();
+            SecPanelLog(@"考勤定位：%@", SecStationTitle(g_clockTarget));
+        }
+    }
     NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
     if (!v) return;
     IMP orig = [v pointerValue];
     ((void (*)(id, SEL, id))orig)(self, _cmd, data);
 }
 
-static void hook_signActionMoveToWindow(id self, SEL _cmd) {
+static void hook_signActionWillMoveToWindow(id self, SEL _cmd, id newWindow) {
     NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
     IMP orig = v ? [v pointerValue] : NULL;
-    if (orig) ((void (*)(id, SEL))orig)(self, _cmd);
-    if (g_enabled && self && [(id)self window]) {
-        SecActivateClockFromObject(self);
+    if (orig) ((void (*)(id, SEL, id))orig)(self, _cmd, newWindow);
+    if (!g_enabled) return;
+    if (newWindow) {
+        SecUpdateClockTargetFromObject(self, 0);
+        if (g_clockTarget.count) {
+            SecPinClockView(self);
+            SecRefreshFakeLocation();
+        }
+    } else if (g_clockPinnedView == self || !g_clockPinnedView) {
+        SecDeactivateClock();
     }
+}
+
+static void hook_signActionRemoveFromSuperview(id self, SEL _cmd) {
+    if (g_enabled && g_clockPinnedView == self) {
+        SecDeactivateClock();
+    }
+    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    if (!v) return;
+    IMP orig = [v pointerValue];
+    ((void (*)(id, SEL))orig)(self, _cmd);
 }
 
 static void hook_userClockWithInfo(id self, SEL _cmd, id info, id completion) {
     if (g_enabled) {
         SecUpdateClockTargetFromObject(info, 0);
-        if (g_clockTarget.count) SecSetClockActive(YES);
         info = SecPatchClockInfo(info);
-        SecRefreshFakeLocation();
         if (g_clockTarget.count) {
             SecPanelLog(@"考勤打卡 %@", SecStationTitle(g_clockTarget));
         }
@@ -1546,7 +1596,6 @@ static void hook_userClockWithInfo(id self, SEL _cmd, id info, id completion) {
 static void hook_userClockContentWithInfo(id self, SEL _cmd, id info, id type, id completion) {
     if (g_enabled && info) {
         SecUpdateClockTargetFromObject(info, 0);
-        if (g_clockTarget.count) SecSetClockActive(YES);
     }
     NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
     if (!v) return;
@@ -1561,9 +1610,8 @@ static void SecInstallClockHooks(void) {
     Class signView = NSClassFromString(@"XPDSignActionView");
     if (signView) {
         SecHookClockSelector(signView, @selector(setPunchData:), (IMP)hook_setPunchData);
-        if (class_getInstanceMethod(signView, @selector(didMoveToWindow))) {
-            SecHookClockSelector(signView, @selector(didMoveToWindow), (IMP)hook_signActionMoveToWindow);
-        }
+        SecHookClockSelector(signView, @selector(willMoveToWindow:), (IMP)hook_signActionWillMoveToWindow);
+        SecHookClockSelector(signView, @selector(removeFromSuperview), (IMP)hook_signActionRemoveFromSuperview);
     }
 
     Class svc = NSClassFromString(@"XPDService");
@@ -1581,98 +1629,63 @@ static void SecInstallClockHooks(void) {
 
 static NSMapTable *g_plateFilledObjects = nil;
 
-static NSSet *SecPlateKnownVCNames(void) {
+static NSSet *SecPlateSkipScanVCNames(void) {
     static NSSet *names;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         names = [NSSet setWithObjects:
                  @"XPDDispatchVehCheckVC",
-                 @"XPDTaskTransferV",
-                 @"XPDTaskChangeVC",
-                 @"XPDCurrTaskVC",
-                 @"XPDCarTakePhoneVC",
-                 @"XPDCarInfoVC",
-                 @"XPDPassOnTaskConfirmVC",
-                 @"XPDPassOnConfrimTabVC",
-                 @"XPDReturnVehVC",
-                 @"XPDChangeVehVC",
-                 @"XPDArrangeVehListVC",
-                 @"XPDCrenelVController",
-                 @"XPDCrenelBindingController",
-                 @"XPDCrenelSearchController",
-                 @"XPDCityLineArrangeVC",
-                 @"XPDCityLineArrangeDealVC",
-                 @"XPDYardSiteVC",
-                 @"XPDStationDealVC",
-                 @"XPDStationDeal1VC",
-                 @"XPDReceiveTaskVC",
-                 @"XPDReceivePassTaskVC",
-                 @"XPDDepartVC",
-                 @"XPDTaskDetailVC",
-                 @"XPDTaskHistoryDetailVC",
-                 @"XPDWorkContentViewController",
-                 @"XPDWorkbenchViewController",
-                 @"XPDVehLocVC",
-                 @"XPDVehMaintainVC",
-                 @"XPDVehPartExpReportVC",
-                 @"XPDArriveStationVC",
-                 @"XPDWaybilPassonVC",
-                 @"XPDTaskPassonVC",
-                 @"WTPlateIDCameraViewController",
                  nil];
     });
     return names;
 }
 
-static BOOL SecObjectHasScanUI(id obj) {
+static NSSet *SecPlateProtectedHeaderLabelKeys(void) {
+    static NSSet *keys;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        keys = [NSSet setWithObjects:
+                @"cardLicencePlate1Lab", @"cardLicencePlate2Lab",
+                @"cardLicensePlate1Lab", @"cardLicensePlate2Lab",
+                nil];
+    });
+    return keys;
+}
+
+static BOOL SecPlateIsCurrTaskVC(id obj) {
     if (!obj) return NO;
-    for (NSString *k in @[
-        @"scanCarBtn", @"scanCrenelBtn", @"licensePlateNumLab", @"licensePlateImg",
-        @"btnScan", @"scanerbtn", @"cphLabel", @"lbCph", @"carNoLab", @"carNolab",
-        @"scanImg", @"replaceScanBut", @"mySetScanImg", @"plateIDRecog", @"socreLabel"
-    ]) {
-        if (SecKVCTry(obj, k)) return YES;
+    if ([obj isKindOfClass:[UIViewController class]] &&
+        [NSStringFromClass([obj class]) isEqualToString:@"XPDCurrTaskVC"]) {
+        return YES;
+    }
+    UIResponder *r = [obj isKindOfClass:[UIResponder class]] ? (UIResponder *)obj : nil;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]] &&
+            [NSStringFromClass([r class]) isEqualToString:@"XPDCurrTaskVC"]) {
+            return YES;
+        }
+        r = r.nextResponder;
     }
     return NO;
 }
 
-static BOOL SecObjectHasScanCallbacks(id obj) {
+static BOOL SecPlateSkipScanTarget(id obj) {
     if (!obj) return NO;
-    return [obj respondsToSelector:@selector(scanSucessWithRegName:color:confidence:)] ||
-           [obj respondsToSelector:@selector(scanResultRegname:color:)] ||
-           [obj respondsToSelector:@selector(scanResultRegname:CPYS:)] ||
-           [obj respondsToSelector:@selector(getCarScan:cpys:)] ||
-           [obj respondsToSelector:@selector(scanAndCheckFramesValidWithImageSource:)] ||
-           [obj respondsToSelector:@selector(btnScanRegnameAction:)] ||
-           [obj respondsToSelector:@selector(tapScanLisenceNo:)] ||
-           [obj respondsToSelector:@selector(scanBtnAction:)] ||
-           [obj respondsToSelector:@selector(btnScanAction:)] ||
-           [obj respondsToSelector:@selector(setCPH:cldm:)];
+    UIViewController *vc = SecViewControllerForResponder(obj);
+    if (!vc && [obj isKindOfClass:[UIViewController class]]) vc = (UIViewController *)obj;
+    while (vc) {
+        if ([SecPlateSkipScanVCNames() containsObject:NSStringFromClass([vc class])]) return YES;
+        vc = vc.parentViewController;
+    }
+    return NO;
 }
 
 static BOOL SecObjectSupportsPlateScan(id obj) {
     if (!obj) return NO;
     NSString *cn = NSStringFromClass([obj class]);
     if ([cn isEqualToString:@"WTPlateIDCameraViewController"]) return YES;
-    if ([SecPlateKnownVCNames() containsObject:cn]) return YES;
-    if ([cn hasPrefix:@"XPD"] || [cn hasPrefix:@"WTPlate"]) {
-        if (SecObjectHasScanCallbacks(obj) || SecObjectHasScanUI(obj)) return YES;
-        static NSArray *nameHints;
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            nameHints = @[
-                @"VehCheck", @"CarTake", @"CarInfo", @"PassOn", @"Passon", @"ReturnVeh",
-                @"ChangeVeh", @"ArrangeVeh", @"Crenel", @"CityLine", @"YardSite",
-                @"StationDeal", @"ReceiveTask", @"Depart", @"TaskDetail", @"TaskConfirm",
-                @"SiteV", @"WorkContent", @"TaskStatus", @"TaskProcess", @"VehPart",
-                @"VehLoc", @"VehMaintain", @"Scan", @"Plate", @"Workbench", @"Waybil"
-            ];
-        });
-        for (NSString *hint in nameHints) {
-            if ([cn containsString:hint]) return YES;
-        }
-    }
-    return NO;
+    if ([SecPlateSkipScanVCNames() containsObject:cn]) return YES;
+    return SecPlateSkipScanTarget(obj);
 }
 
 static UIViewController *SecViewControllerForResponder(id obj) {
@@ -1837,11 +1850,10 @@ static id SecPlateScanTargetForObject(id obj) {
     if (!obj) return nil;
     NSString *cn = NSStringFromClass([obj class]);
     if ([cn isEqualToString:@"WTPlateIDCameraViewController"]) {
-        return SecPlateCameraHostVC((UIViewController *)obj);
+        id host = SecPlateCameraHostVC((UIViewController *)obj);
+        return SecPlateSkipScanTarget(host) ? host : nil;
     }
-    if (SecObjectSupportsPlateScan(obj)) return obj;
-    UIViewController *vc = SecViewControllerForResponder(obj);
-    if (vc && SecObjectSupportsPlateScan(vc)) return vc;
+    if (SecPlateSkipScanTarget(obj)) return obj;
     return nil;
 }
 
@@ -1855,6 +1867,7 @@ static BOOL SecPlateVisibleOnObject(id obj, NSString *expectedPlate) {
 
 static void SecApplyPlateToViewHierarchy(UIView *view, NSString *plate, NSInteger depth) {
     if (!view || !plate.length || depth > 14) return;
+    if (SecPlateIsCurrTaskVC(view)) return;
     if ([view isKindOfClass:[UILabel class]]) {
         UILabel *lab = (UILabel *)view;
         NSString *t = SecNormalizePlateText(lab.text);
@@ -1883,12 +1896,13 @@ static void SecApplyPlateToVisibleCells(UIViewController *vc, NSString *plate);
 
 static void SecApplyPlateToUI(id obj, NSString *plate) {
     if (!obj || !plate.length) return;
+    if (SecPlateIsCurrTaskVC(obj)) return;
     NSArray *labelKeys = @[
-        @"licensePlateNumLab", @"carNoLab", @"cphLabel", @"lbCph", @"carNolab",
-        @"cardLicencePlate1Lab", @"cardLicencePlate2Lab",
-        @"cardLicensePlate1Lab", @"cardLicensePlate2Lab"
+        @"licensePlateNumLab", @"carNoLab", @"cphLabel", @"lbCph", @"carNolab"
     ];
+    NSSet *protected = SecPlateProtectedHeaderLabelKeys();
     for (NSString *k in labelKeys) {
+        if ([protected containsObject:k]) continue;
         id lab = SecKVCTry(obj, k);
         if ([lab respondsToSelector:@selector(setText:)]) {
             [lab setText:plate];
@@ -1918,7 +1932,7 @@ static void SecApplyPlateToVisibleCells(UIViewController *vc, NSString *plate) {
     }
 }
 
-static void SecInvokePlateScanSuccess(id obj, NSString *plate, id color) {
+static void SecInvokePlateScanSuccess(id obj, NSString *plate, id color, BOOL touchUI) {
     if (!obj || !plate.length) return;
 
     if ([obj respondsToSelector:@selector(scanSucessWithRegName:color:confidence:)]) {
@@ -1944,7 +1958,9 @@ static void SecInvokePlateScanSuccess(id obj, NSString *plate, id color) {
                 obj, @selector(setCPH:cldm:), plate, cldm);
         }
     }
-    SecApplyPlateToUI(obj, plate);
+    if (touchUI && !SecPlateIsCurrTaskVC(obj)) {
+        SecApplyPlateToUI(obj, plate);
+    }
 }
 
 static UIViewController *SecPlateCameraHostVC(UIViewController *cameraVC) {
@@ -1961,6 +1977,7 @@ static UIViewController *SecPlateCameraHostVC(UIViewController *cameraVC) {
 
 static BOOL SecTryAutoFillPlateOnObject(id obj, BOOL allowRetry) {
     if (!g_licensed || !obj) return NO;
+    if (!SecPlateSkipScanTarget(obj)) return NO;
 
     NSString *cn = NSStringFromClass([obj class]);
     id target = SecPlateScanTargetForObject(obj);
@@ -1971,11 +1988,7 @@ static BOOL SecTryAutoFillPlateOnObject(id obj, BOOL allowRetry) {
     }
 
     NSString *cached = [g_plateFilledObjects objectForKey:target];
-    if (cached.length) {
-        if (SecPlateVisibleOnObject(target, cached)) return YES;
-        if (!allowRetry) return NO;
-        [g_plateFilledObjects removeObjectForKey:target];
-    }
+    if (cached.length) return YES;
 
     NSString *plate = SecResolvePlateForObject(target);
     if (!plate.length) {
@@ -1984,12 +1997,7 @@ static BOOL SecTryAutoFillPlateOnObject(id obj, BOOL allowRetry) {
     }
 
     id color = SecReadPlateColorFromObject(target) ?: @"1";
-    SecInvokePlateScanSuccess(target, plate, color);
-
-    if (!SecPlateVisibleOnObject(target, plate)) {
-        SecDebugLog(@"填牌后界面未显示 %@ %@", plate, NSStringFromClass([target class]));
-        return NO;
-    }
+    SecInvokePlateScanSuccess(target, plate, color, NO);
 
     [g_plateFilledObjects setObject:plate forKey:target];
 
@@ -1999,8 +2007,8 @@ static BOOL SecTryAutoFillPlateOnObject(id obj, BOOL allowRetry) {
         });
     }
 
-    SecPanelLog(@"已自动填牌 %@", plate);
-    SecDebugLog(@"自动填牌 %@ color=%@ target=%@", plate, color, NSStringFromClass([target class]));
+    SecPanelLog(@"已跳过扫牌 %@", plate);
+    SecDebugLog(@"跳过扫牌 %@ color=%@ target=%@", plate, color, NSStringFromClass([target class]));
     return YES;
 }
 
@@ -2059,14 +2067,14 @@ static void SecCallOrigScanAction(id self, SEL sel, id sender) {
 }
 
 static void SecHookGenericScanAction(id self, SEL _cmd, id sender) {
-    if (SecTryAutoFillPlateOnObject(self, YES)) return;
+    if (SecPlateSkipScanTarget(self) && SecTryAutoFillPlateOnObject(self, YES)) return;
     SecCallOrigScanAction(self, _cmd, sender);
 }
 
 static NSMutableDictionary *g_scanFrameOrigIMPs = nil;
 
 static BOOL SecHookScanFrameValid(id self, SEL _cmd, id imageSource) {
-    if (g_licensed && SecTryAutoFillPlateOnObject(self, YES)) return YES;
+    if (g_licensed && SecPlateSkipScanTarget(self) && SecTryAutoFillPlateOnObject(self, YES)) return YES;
     if (!g_scanFrameOrigIMPs) return YES;
     NSValue *v = g_scanFrameOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
     BOOL (*orig)(id, SEL, id) = v ? (BOOL (*)(id, SEL, id))[v pointerValue] : NULL;
@@ -2147,7 +2155,7 @@ static void SecInstallPlateHooks(void) {
     }
     free(classes);
     installed = YES;
-    SecDebugLog(@"扫牌自动填牌 Hook 就绪（全界面）");
+    SecDebugLog(@"扫牌跳过 Hook 就绪（开始/结束任务）");
 }
 
 #pragma mark - UI
@@ -2502,7 +2510,7 @@ static void SecEnsureUI(void) {
         SecStopGpsPulse();
         g_routeActive = NO;
         g_routeFinished = NO;
-        SecSetClockActive(NO);
+        SecDeactivateClock();
     }
 }
 
