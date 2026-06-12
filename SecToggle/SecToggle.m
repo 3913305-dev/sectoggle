@@ -39,7 +39,38 @@ static NSString *g_taskBcdh = nil;
 static NSString *g_taskBcmxdh = nil;
 static BOOL g_simulatingAuto = NO;
 static BOOL g_inAutoStayedChain = NO;
+static BOOL g_forceAutoCzlx = NO;
 static NSTimeInterval g_lastSimTime = 0;
+
+static BOOL SecIsManualDealType(id dealType) {
+    if (!dealType || dealType == (id)kCFNull) return NO;
+    NSString *dt = [dealType description];
+    static NSSet *manualTypes;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        manualTypes = [NSSet setWithObjects:@"0", @"1", @"8100", @"8101", nil];
+    });
+    return [manualTypes containsObject:dt];
+}
+
+static id SecAutoDealType(void) {
+    if (g_cachedAutoDealType && !SecIsManualDealType(g_cachedAutoDealType)) {
+        return g_cachedAutoDealType;
+    }
+    return @8102;
+}
+
+static void SecClearSimFlags(void) {
+    g_simulatingAuto = NO;
+    g_inAutoStayedChain = NO;
+    g_forceAutoCzlx = NO;
+}
+
+static void SecScheduleClearSimFlags(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        SecClearSimFlags();
+    });
+}
 static NSHashTable *g_stayedTargets = nil;
 static NSHashTable *g_siteTargets = nil;
 
@@ -159,6 +190,17 @@ static NSString *PatchJson(NSString *raw) {
             rep = [NSString stringWithFormat:@"\"%@\":%f", key, jd];
         }
         out = [re stringByReplacingMatchesInString:out options:0 range:NSMakeRange(0, out.length) withTemplate:rep];
+    }
+
+    if (g_simulatingAuto || g_forceAutoCzlx) {
+        NSString *autoCzlx = [SecAutoDealType() description];
+        NSArray *czKeys = @[@"n_czlx", @"c_czlx", @"czlx"];
+        for (NSString *key in czKeys) {
+            NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9]+\"?", key];
+            NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
+            NSString *rep = [NSString stringWithFormat:@"\"%@\":%@", key, autoCzlx];
+            out = [re stringByReplacingMatchesInString:out options:0 range:NSMakeRange(0, out.length) withTemplate:rep];
+        }
     }
     return out;
 }
@@ -501,7 +543,7 @@ static NSInteger SecDirectDealTask(void) {
     NSNumber *lat = @([t[@"wd"] doubleValue]);
     NSNumber *lon = @([t[@"jd"] doubleValue]);
     NSNumber *fjsj = @((NSInteger)([[NSDate date] timeIntervalSince1970] * 1000));
-    id dealType = g_cachedAutoDealType ?: @2;
+    id dealType = SecAutoDealType();
 
     void (^completion)(id, NSError *) = ^(id resp, NSError *err) {
         NSLog(@"[SecToggle] dealTask 回调 err=%@ resp=%@", err, resp);
@@ -575,20 +617,27 @@ static void SecSimulateAutoArrive(void) {
 
     SecInstallDealTaskHooks();
     SecInstallStayedHooks();
+    SecCollectTaskIdsFromUI();
 
     g_simulatingAuto = YES;
+    g_forceAutoCzlx = YES;
 
-    NSInteger n = SecTriggerAutoStayedOnce();
-
-    g_simulatingAuto = NO;
+    NSInteger n = SecDirectDealTask();
+    if (n == 0) {
+        n = SecTriggerAutoStayedOnce();
+    }
 
     if (n == 0) {
+        SecClearSimFlags();
         SecShowSimResult(@"未找到自动入口，请开关ON等待围栏或手动点到达");
         NSLog(@"[SecToggle] 无 Stayed 目标 zddm=%@", t[@"zddm"]);
-    } else if (g_lastDealType.length) {
-        SecShowSimResult([NSString stringWithFormat:@"已触发自动 dealType=%@", g_lastDealType]);
     } else {
-        SecShowSimResult(@"已触发自动到达(Stayed×1)");
+        SecScheduleClearSimFlags();
+        if (g_lastDealType.length) {
+            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", g_lastDealType]);
+        } else {
+            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", SecAutoDealType()]);
+        }
     }
 }
 
@@ -599,22 +648,24 @@ static void (*orig_dealTask)(id, SEL, id, id, id, id, id, id, id, id);
 static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
                           id lat, id lon, id fjsj, id dealType, id completion) {
     g_dealTaskTarget = self;
-    g_lastDealType = [dealType description];
-    g_lastDealClass = NSStringFromClass([self class]);
 
-    NSString *dt = g_lastDealType;
-    if (g_inAutoStayedChain || (dt.length && ![dt isEqualToString:@"0"] && ![dt isEqualToString:@"1"])) {
-        g_cachedAutoDealType = dealType;
+    id useType = dealType;
+    if (g_simulatingAuto || g_inAutoStayedChain || g_forceAutoCzlx) {
+        if (SecIsManualDealType(dealType)) {
+            useType = SecAutoDealType();
+            NSLog(@"[SecToggle] 强制自动 dealType %@ → %@", dealType, useType);
+        }
+    }
+
+    g_lastDealType = [useType description];
+    g_lastDealClass = NSStringFromClass([self class]);
+    if (!SecIsManualDealType(useType)) {
+        g_cachedAutoDealType = useType;
     }
 
     NSLog(@"[SecToggle] dealTask class=%@ zddm=%@ dealType=%@ lat=%@ lon=%@",
-          g_lastDealClass, zddm, dealType, lat, lon);
-    orig_dealTask(self, _cmd, bcdh, bcmxdh, zddm, lat, lon, fjsj, dealType, completion);
-    if (g_simulatingAuto) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            SecShowSimResult([NSString stringWithFormat:@"dealType=%@", g_lastDealType]);
-        });
-    }
+          g_lastDealClass, zddm, useType, lat, lon);
+    orig_dealTask(self, _cmd, bcdh, bcmxdh, zddm, lat, lon, fjsj, useType, completion);
 }
 
 static void SecInstallDealTaskHooks(void) {
@@ -791,7 +842,7 @@ static CLLocationCoordinate2D hook_coord(id self, SEL _cmd) {
 static void (*orig_setBody)(id, SEL, NSData *);
 
 static void hook_setBody(id self, SEL _cmd, NSData *body) {
-    if (g_enabled && body.length > 0 && body.length < 65536) {
+    if (body.length > 0 && body.length < 65536 && (g_enabled || g_simulatingAuto || g_forceAutoCzlx)) {
         NSString *raw = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
         if (raw) {
             NSMutableURLRequest *req = (NSMutableURLRequest *)self;
