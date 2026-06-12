@@ -27,9 +27,11 @@ static void SecSelectStationAtIndex(NSInteger idx);
 static void SecRefreshFakeLocation(void);
 static void SecStartGpsPulse(void);
 static void SecStopGpsPulse(void);
-static void SecApplyDriveMode(void);
+static void SecApplyDriveMode(BOOL syncPickerToRoute);
 static void SecBuildAutoRoute(void);
 static void SecBuildPendingRouteTo(NSInteger targetIdx);
+static NSDictionary *RouteDestStation(void);
+static NSInteger SecIndexForZddm(NSString *zddm);
 static BOOL SecDictIndicatesArrived(NSDictionary *dict);
 static BOOL SecStationIsArrived(NSDictionary *s);
 static void SecMarkStationArrived(NSDictionary *s);
@@ -67,7 +69,9 @@ static BOOL g_hooksInstalled = NO;
 static NSString *g_deviceUUID = nil;
 static NSMutableArray *g_stations = nil;
 static NSInteger g_stationIndex = 0;
+static NSInteger g_routeDestIndex = -1;
 static NSString *g_selectedZddm = nil;
+static BOOL g_userPickedStation = NO;
 static UIView *g_panel = nil;
 static UIButton *g_floatingIcon = nil;
 static UIWindow *g_hostWindow = nil;
@@ -237,18 +241,35 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 SecUpdateStatusLabel();
                 SecUpdateStationPicker();
-                if (g_enabled && g_stations.count) SecApplyDriveMode();
+                if (g_enabled && g_stations.count) SecApplyDriveMode(NO);
             });
         }
     }
     for (id k in dict) ExtractStationsFromObject(dict[k], depth + 1);
 }
 
+static NSInteger SecIndexForZddm(NSString *zddm) {
+    if (!zddm.length) return -1;
+    for (NSUInteger i = 0; i < g_stations.count; i++) {
+        if ([g_stations[i][@"zddm"] isEqualToString:zddm]) return (NSInteger)i;
+    }
+    return -1;
+}
+
 static NSDictionary *DisplayStation(void) {
     if (g_stations.count == 0) return nil;
-    NSInteger idx = g_stationIndex;
+    NSInteger idx = SecIndexForZddm(g_selectedZddm);
+    if (idx < 0) idx = g_stationIndex;
     if (idx < 0 || idx >= (NSInteger)g_stations.count) idx = 0;
+    g_stationIndex = idx;
     return g_stations[idx];
+}
+
+static NSDictionary *RouteDestStation(void) {
+    if (g_routeDestIndex >= 0 && g_routeDestIndex < (NSInteger)g_stations.count) {
+        return g_stations[g_routeDestIndex];
+    }
+    return DisplayStation();
 }
 
 static NSString *SecStationTitle(NSDictionary *t) {
@@ -365,6 +386,7 @@ static void SecSortStations(void) {
 
 static NSDictionary *SpoofTarget(void) {
     if (g_stations.count == 0 || !g_enabled) return nil;
+    if (g_autoMode && g_routeActive && g_routeDestIndex >= 0) return RouteDestStation();
     return DisplayStation();
 }
 
@@ -468,11 +490,11 @@ static void SecBuildPendingRouteTo(NSInteger targetIdx) {
     }
     if (!chain.count) {
         g_routeActive = NO;
+        g_routeDestIndex = -1;
         return;
     }
 
-    g_stationIndex = chain.lastObject.integerValue;
-    g_selectedZddm = [g_stations[g_stationIndex][@"zddm"] description];
+    g_routeDestIndex = chain.lastObject.integerValue;
 
     if (chain.count == 1) {
         NSDictionary *s = g_stations[chain[0].integerValue];
@@ -517,13 +539,28 @@ static void SecBuildAutoRoute(void) {
     }
     if (lastPending < 0) {
         g_routeActive = NO;
+        g_routeDestIndex = -1;
         SecPanelLog(@"全自动：无待到达站点");
         return;
     }
-    SecBuildPendingRouteTo(lastPending);
+
+    NSInteger target = lastPending;
+    if (g_userPickedStation) {
+        NSInteger picked = SecIndexForZddm(g_selectedZddm);
+        if (picked >= 0 && !SecStationIsArrived(g_stations[picked])) {
+            target = picked;
+        }
+    }
+    SecBuildPendingRouteTo(target);
 }
 
-static void SecApplyDriveMode(void) {
+static void SecSyncPickerToRouteDest(void) {
+    if (g_routeDestIndex < 0 || g_routeDestIndex >= (NSInteger)g_stations.count) return;
+    g_stationIndex = g_routeDestIndex;
+    g_selectedZddm = [g_stations[g_routeDestIndex][@"zddm"] description];
+}
+
+static void SecApplyDriveMode(BOOL syncPickerToRoute) {
     g_routeFinished = NO;
     if (!g_enabled || !g_stations.count) {
         g_routeActive = NO;
@@ -531,7 +568,12 @@ static void SecApplyDriveMode(void) {
     }
     if (g_autoMode) {
         SecBuildAutoRoute();
+        if (syncPickerToRoute) {
+            SecSyncPickerToRouteDest();
+            g_userPickedStation = NO;
+        }
     } else {
+        g_routeDestIndex = -1;
         g_routeActive = NO;
         [g_routePoints removeAllObjects];
         [g_routeLegEnds removeAllObjects];
@@ -563,7 +605,7 @@ static BOOL SecActiveGpsCoords(double *outLat, double *outLon) {
         double lon = [p[1] doubleValue];
 
         if (g_routeFinished) {
-            NSDictionary *t = DisplayStation();
+            NSDictionary *t = RouteDestStation();
             if (t) {
                 SecSpoofedCoords(t, outLat, outLon, YES);
                 return YES;
@@ -726,6 +768,7 @@ static void SecRefreshFakeLocation(void) {
 static void SecSelectStationAtIndex(NSInteger idx) {
     if (g_stations.count == 0) return;
     if (idx < 0 || idx >= (NSInteger)g_stations.count) idx = 0;
+    g_userPickedStation = YES;
     g_stationIndex = idx;
     g_selectedZddm = [g_stations[idx][@"zddm"] description];
     if (g_enabled) {
@@ -733,6 +776,7 @@ static void SecSelectStationAtIndex(NSInteger idx) {
             SecBuildPendingRouteTo(idx);
             SecRefreshFakeLocation();
         } else {
+            g_routeDestIndex = -1;
             g_routeActive = NO;
             g_routeFinished = NO;
             SecPanelLog(@"手动 %@", SecStationTitle(g_stations[idx]));
@@ -767,7 +811,7 @@ static void SecGpsPulseTick(NSTimer *timer) {
             if (prev < endIdx && g_routeIndex >= endIdx && leg < g_routeLegStationIdx.count) {
                 NSInteger passIdx = [g_routeLegStationIdx[leg] integerValue];
                 if (passIdx >= 0 && passIdx < (NSInteger)g_stations.count) {
-                    if (passIdx != g_stationIndex) {
+                    if (passIdx != g_routeDestIndex) {
                         SecPanelLog(@"途经 %@", SecStationTitle(g_stations[passIdx]));
                     }
                     if (g_autoMode) SecMarkStationArrived(g_stations[passIdx]);
@@ -777,15 +821,17 @@ static void SecGpsPulseTick(NSTimer *timer) {
 
         if (g_routeIndex >= g_routePoints.count - 1) {
             g_routeFinished = YES;
-            NSDictionary *arrived = DisplayStation();
+            NSDictionary *arrived = RouteDestStation();
             SecPanelLog(@"到达 %@", SecStationTitle(arrived));
             if (g_autoMode && arrived) {
                 SecMarkStationArrived(arrived);
                 SecBuildAutoRoute();
+                SecSyncPickerToRouteDest();
+                SecUpdateStationPicker();
                 if (!g_routeActive) SecPanelLog(@"全自动：全部完成");
             }
         } else if (g_routeIndex != prev) {
-            NSDictionary *dest = DisplayStation();
+            NSDictionary *dest = RouteDestStation();
             NSArray *cur = g_routePoints[g_routeIndex];
             double remain = 0;
             for (NSUInteger i = g_routeIndex + 1; i < g_routePoints.count; i++) {
@@ -1344,7 +1390,8 @@ static void SecEnsureUI(void) {
     SecUpdateStatusLabel();
     SecUpdateStationPicker();
     if (g_enabled && g_stations.count) {
-        SecApplyDriveMode();
+        SecApplyDriveMode(YES);
+        SecUpdateStationPicker();
         NSDictionary *t = DisplayStation();
         if (t && !g_autoMode) {
             SecPanelLog(@"GPS→%@", SecStationTitle(t));
@@ -1366,7 +1413,8 @@ static void SecEnsureUI(void) {
     g_autoMode = sender.selectedSegmentIndex == 1;
     SecPanelLog(@"模式 → %@", g_autoMode ? @"全自动" : @"手动");
     SecUpdateStatusLabel();
-    if (g_enabled && g_stations.count) SecApplyDriveMode();
+    if (g_enabled && g_stations.count) SecApplyDriveMode(YES);
+    SecUpdateStationPicker();
 }
 
 - (void)onPickStation:(id)sender {
