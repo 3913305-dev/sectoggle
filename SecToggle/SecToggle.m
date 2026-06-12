@@ -942,37 +942,16 @@ static void SecSetPanelVisible(BOOL visible) {
     if (g_panel) g_panel.hidden = !visible;
 }
 
-static NSString *g_lastActivateError = nil;
-
 static BOOL SecTryActivate(NSString *code) {
-    g_lastActivateError = nil;
     if (!g_deviceUUID.length) g_deviceUUID = [SecDeviceID keychainDeviceUUID];
     NSString *trimmed = [code stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!trimmed.length) {
-        g_lastActivateError = @"请输入激活码";
-        return NO;
-    }
+    if (!trimmed.length) return NO;
     NSString *formatted = SecLicenseCanonicalCode(trimmed);
-    if (!formatted.length) {
-        g_lastActivateError = @"激活码格式错误\n应为 XXXX-XXXX-XXXX-XXXX-YYYYMMDD";
-        return NO;
-    }
+    if (!formatted.length) return NO;
     NSString *expiry = SecLicenseExpiryFromCode(formatted);
-    if (expiry.length && SecLicenseIsExpired(expiry)) {
-        g_lastActivateError = [NSString stringWithFormat:@"激活码已过期（%@）", SecLicenseExpiryDisplay(expiry)];
-        return NO;
-    }
-    if (!SecLicenseVerify(g_deviceUUID, formatted, kSecLicenseDefaultSecret)) {
-        NSString *shortCode = SecLicenseDeviceCodeShort(g_deviceUUID) ?: @"—";
-        g_lastActivateError = [NSString stringWithFormat:
-            @"与当前设备 UUID 不匹配\n发码时请粘贴面板「复制 UUID」的内容\n本机短码：%@\n勿用 IDFV 或 Sec发码 本机 UUID",
-            shortCode];
-        return NO;
-    }
-    if (![SecDeviceID saveActivationCode:formatted]) {
-        g_lastActivateError = @"保存激活码失败，请重试";
-        return NO;
-    }
+    if (expiry.length && SecLicenseIsExpired(expiry)) return NO;
+    if (!SecLicenseVerify(g_deviceUUID, formatted, kSecLicenseDefaultSecret)) return NO;
+    if (![SecDeviceID saveActivationCode:formatted]) return NO;
     g_licensed = YES;
     SecInstallHooks();
     SecUpdateLicenseUI();
@@ -1343,9 +1322,9 @@ static void SecEnsureUI(void) {
     [ac addAction:[UIAlertAction actionWithTitle:@"激活" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         NSString *code = ac.textFields.firstObject.text;
         if (SecTryActivate(code)) return;
-        SecPanelLog(@"激活失败：%@", g_lastActivateError ?: @"未知错误");
-        UIAlertController *err = [UIAlertController alertControllerWithTitle:@"激活失败"
-                                                                     message:g_lastActivateError ?: @"请核对 UUID 与激活码"
+        SecPanelLog(@"激活码无效");
+        UIAlertController *err = [UIAlertController alertControllerWithTitle:@"激活码无效"
+                                                                     message:nil
                                                               preferredStyle:UIAlertControllerStyleAlert];
         [err addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *vc = SecPresenterVC();
