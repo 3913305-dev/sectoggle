@@ -19,6 +19,9 @@ static void SecPanelLog(NSString *format, ...);
 static void SecSimulateAutoArriveImpl(void);
 static NSString *SecStationTitle(NSDictionary *t);
 static NSString *SecShortURL(NSString *url);
+static void SecRefreshFakeLocation(void);
+static void SecStartGpsPulse(void);
+static void SecStopGpsPulse(void);
 static SEL SecDealTaskSel(void);
 
 @interface SecToggleHandler : NSObject
@@ -51,6 +54,10 @@ static BOOL g_simulatingAuto = NO;
 static BOOL g_inAutoStayedChain = NO;
 static BOOL g_forceAutoCzlx = NO;
 static NSTimeInterval g_lastSimTime = 0;
+static CLLocation *g_fakeLocation = nil;
+static NSTimer *g_gpsPulseTimer = nil;
+static double g_fakeLat = 0;
+static double g_fakeLon = 0;
 
 static BOOL SecIsManualDealType(id dealType) {
     if (!dealType || dealType == (id)kCFNull) return NO;
@@ -297,9 +304,52 @@ static NSString *SecShortURL(NSString *url) {
 static void NextStation(void) {
     if (g_stations.count == 0) return;
     g_stationIndex = (g_stationIndex + 1) % g_stations.count;
+    SecRefreshFakeLocation();
     RefreshTarget();
     NSDictionary *t = DisplayStation();
     if (t) SecPanelLog(@"切换 → %@", SecStationTitle(t));
+}
+
+static void SecRefreshFakeLocation(void) {
+    g_fakeLocation = nil;
+}
+
+static CLLocation *SecFakeLocation(void) {
+    NSDictionary *t = SpoofTarget();
+    if (!t) return nil;
+    double lat = [t[@"wd"] doubleValue];
+    double lon = [t[@"jd"] doubleValue];
+    if (g_fakeLocation && lat == g_fakeLat && lon == g_fakeLon) {
+        return g_fakeLocation;
+    }
+    g_fakeLat = lat;
+    g_fakeLon = lon;
+    g_fakeLocation = [[CLLocation alloc] initWithLatitude:lat longitude:lon];
+    return g_fakeLocation;
+}
+
+static void SecGpsPulseTick(NSTimer *timer) {
+    (void)timer;
+    if (!g_enabled) return;
+    SecRefreshFakeLocation();
+    (void)SecFakeLocation();
+    NSDictionary *t = DisplayStation();
+    if (t) SecPanelLog(@"GPS维持 %@", SecStationTitle(t));
+}
+
+static void SecStartGpsPulse(void) {
+    SecStopGpsPulse();
+    g_gpsPulseTimer = [NSTimer scheduledTimerWithTimeInterval:8.0
+                                                      repeats:YES
+                                                        block:^(NSTimer *t) {
+        SecGpsPulseTick(t);
+    }];
+    SecGpsPulseTick(nil);
+}
+
+static void SecStopGpsPulse(void) {
+    [g_gpsPulseTimer invalidate];
+    g_gpsPulseTimer = nil;
 }
 
 #pragma mark - 方案 B：模拟自动到达
@@ -473,8 +523,57 @@ static void SecWalkWindows(void (^visit)(id)) {
     });
 }
 
+static void SecEnumerateViewControllers(void (^block)(UIViewController *vc)) {
+    if (!block) return;
+    SecForEachWindow(^(UIWindow *win) {
+        NSMutableArray *stack = [NSMutableArray array];
+        if (win.rootViewController) [stack addObject:win.rootViewController];
+        while (stack.count) {
+            UIViewController *vc = stack.lastObject;
+            [stack removeLastObject];
+            if (!vc) continue;
+            block(vc);
+            if (vc.presentedViewController) [stack addObject:vc.presentedViewController];
+            if ([vc isKindOfClass:[UINavigationController class]]) {
+                [stack addObjectsFromArray:[(UINavigationController *)vc viewControllers]];
+            } else if ([vc isKindOfClass:[UITabBarController class]]) {
+                [stack addObjectsFromArray:[(UITabBarController *)vc viewControllers]];
+            }
+            if (vc.childViewControllers.count) {
+                [stack addObjectsFromArray:vc.childViewControllers];
+            }
+        }
+    });
+}
+
+static id SecFindServiceFromTaskPages(void) {
+    SEL dealSel = SecDealTaskSel();
+    __block id found = nil;
+    SecEnumerateViewControllers(^(UIViewController *vc) {
+        if (found) return;
+        NSString *cn = NSStringFromClass([vc class]);
+        if (![cn hasPrefix:@"XPD"]) return;
+        for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
+            id svc = SecKVCTry(vc, key);
+            if (svc && [svc respondsToSelector:dealSel]) {
+                found = svc;
+                SecPanelLog(@"service ← %@.%@", cn, key);
+                return;
+            }
+        }
+        if ([vc respondsToSelector:dealSel]) {
+            found = vc;
+            SecPanelLog(@"dealTask ← %@", cn);
+        }
+    });
+    if (found) g_dealTaskTarget = found;
+    return found;
+}
+
 static id SecFastDealTaskTarget(void) {
     if (g_dealTaskTarget) return g_dealTaskTarget;
+    id svc = SecFindServiceFromTaskPages();
+    if (svc) return svc;
     Class cls = NSClassFromString(@"XPDService");
     id inst = SecSingletonFromClass(cls);
     if (inst) g_dealTaskTarget = inst;
@@ -509,18 +608,16 @@ static id SecResolveDealTaskTarget(void) {
 }
 
 static void SecCollectTaskIdsFromUI(void) {
-    SecWalkWindows(^(id node) {
+    SecEnumerateViewControllers(^(UIViewController *vc) {
         if (!g_taskBcdh.length) {
-            g_taskBcdh = SecStringFromKV(node, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh", @"c_bcdh"]);
+            g_taskBcdh = SecStringFromKV(vc, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh", @"c_bcdh"]);
         }
         if (!g_taskBcmxdh.length) {
-            g_taskBcmxdh = SecStringFromKV(node, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh", @"c_bcmxdh"]);
+            g_taskBcmxdh = SecStringFromKV(vc, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh", @"c_bcmxdh"]);
         }
-        if (SecIsXPDObject(node)) {
-            for (NSString *key in @[@"service", @"_service"]) {
-                id svc = SecKVCTry(node, key);
-                if (svc && !g_dealTaskTarget) g_dealTaskTarget = svc;
-            }
+        if (!g_dealTaskTarget && SecIsXPDObject(vc)) {
+            id svc = SecKVCTry(vc, @"service") ?: SecKVCTry(vc, @"_service");
+            if (svc) g_dealTaskTarget = svc;
         }
     });
 }
@@ -733,29 +830,21 @@ static void SecSimulateAutoArriveImpl(void) {
 
     id target = SecFastDealTaskTarget();
     if (!target) {
-        SecShowSimResult(@"无 XPDService，请先进任务页");
+        SecShowSimResult(@"无 service，请打开当前任务页");
         return;
     }
 
     g_simulatingAuto = YES;
     g_forceAutoCzlx = YES;
-    SecPanelLog(@"后台提交 dealTask…");
 
-    id strongTarget = target;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        @autoreleasepool {
-            NSInteger n = SecDirectDealTaskOn(strongTarget);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (n == 0) {
-                    SecClearSimFlags();
-                    SecShowSimResult(@"dealTask 调用失败");
-                } else {
-                    SecScheduleClearSimFlags();
-                    SecShowSimResult(@"已提交 dealTask");
-                }
-            });
-        }
-    });
+    NSInteger n = SecDirectDealTaskOn(target);
+    if (n == 0) {
+        SecClearSimFlags();
+        SecShowSimResult(@"dealTask 调用失败");
+    } else {
+        SecScheduleClearSimFlags();
+        SecShowSimResult(@"已提交 dealTask");
+    }
 }
 
 static void SecSimulateAutoArrive(void) {
@@ -977,19 +1066,19 @@ static void SecCreatePanel(void) {
     SecPanelLog(@"开关 %@", g_enabled ? @"ON" : @"OFF");
     SecUpdateStatusLabel();
     if (g_enabled && g_stations.count) {
+        SecRefreshFakeLocation();
         NSDictionary *t = DisplayStation();
         if (t) {
             SecPanelLog(@"GPS→%@", SecStationTitle(t));
         }
-        if (!g_taskBcmxdh.length) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                SecCollectTaskIdsFromUI();
-                if (g_taskBcmxdh.length) {
-                    SecPanelLog(@"已获取 bcmxdh %@", g_taskBcmxdh);
-                }
-            });
+        SecStartGpsPulse();
+        if (!g_taskBcmxdh.length || !g_dealTaskTarget) {
+            SecCollectTaskIdsFromUI();
+            if (g_taskBcmxdh.length) SecPanelLog(@"bcmxdh %@", g_taskBcmxdh);
+            if (g_dealTaskTarget) SecPanelLog(@"已缓存 service");
         }
+    } else {
+        SecStopGpsPulse();
     }
 }
 
@@ -1017,6 +1106,7 @@ static void SecCreatePanel(void) {
 static CLLocationCoordinate2D (*orig_coord)(id, SEL);
 static double (*orig_latitude)(id, SEL);
 static double (*orig_longitude)(id, SEL);
+static CLLocation *(*orig_managerLocation)(id, SEL);
 
 static CLLocationCoordinate2D hook_coord(id self, SEL _cmd) {
     NSDictionary *t = SpoofTarget();
@@ -1039,6 +1129,12 @@ static double hook_longitude(id self, SEL _cmd) {
     NSDictionary *t = SpoofTarget();
     if (t) return [t[@"jd"] doubleValue];
     return orig_longitude(self, _cmd);
+}
+
+static CLLocation *hook_managerLocation(id self, SEL _cmd) {
+    CLLocation *fake = SecFakeLocation();
+    if (fake) return fake;
+    return orig_managerLocation(self, _cmd);
 }
 
 static void (*orig_setBody)(id, SEL, NSData *);
@@ -1093,6 +1189,12 @@ static void SecInstallHooks(void) {
     if (mLon) {
         orig_longitude = (double (*)(id, SEL))method_getImplementation(mLon);
         method_setImplementation(mLon, (IMP)hook_longitude);
+    }
+
+    Method mLoc = class_getInstanceMethod([CLLocationManager class], @selector(location));
+    if (mLoc) {
+        orig_managerLocation = (CLLocation *(*)(id, SEL))method_getImplementation(mLoc);
+        method_setImplementation(mLoc, (IMP)hook_managerLocation);
     }
 
     Method m2 = class_getInstanceMethod([NSMutableURLRequest class], @selector(setHTTPBody:));
