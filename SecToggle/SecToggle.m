@@ -9,6 +9,7 @@
 #import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <math.h>
 
 void SecUpdateStatusLabel(void);
 static void SecInstallDealTaskHooks(void);
@@ -56,8 +57,7 @@ static BOOL g_forceAutoCzlx = NO;
 static NSTimeInterval g_lastSimTime = 0;
 static CLLocation *g_fakeLocation = nil;
 static NSTimer *g_gpsPulseTimer = nil;
-static double g_fakeLat = 0;
-static double g_fakeLon = 0;
+static NSInteger g_gpsPulseIndex = 0;
 
 static BOOL SecIsManualDealType(id dealType) {
     if (!dealType || dealType == (id)kCFNull) return NO;
@@ -131,6 +131,7 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
 
     if (zddm.length && !isnan(lon) && !isnan(lat) && (lon != 0 || lat != 0)) {
         NSInteger queue = (NSInteger)ParseDouble(dict[@"n_queue"]);
+        double zdbj = ParseDouble(dict[@"n_zdbj"]);
         NSString *key = [NSString stringWithFormat:@"%@@%f,%f", zddm, lon, lat];
         BOOL exists = NO;
         for (NSMutableDictionary *s in g_stations) {
@@ -138,6 +139,7 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
                 exists = YES;
                 if (name.length) s[@"name"] = name;
                 if (queue > 0) s[@"queue"] = @(queue);
+                if (zdbj > 0) s[@"zdbj"] = @(zdbj);
                 s[@"jd"] = @(lon);
                 s[@"wd"] = @(lat);
                 break;
@@ -145,7 +147,8 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
         }
         if (!exists) {
             NSMutableDictionary *entry = [@{@"key":key, @"zddm":zddm, @"name":name,
-                                            @"jd":@(lon), @"wd":@(lat), @"queue":@(queue)} mutableCopy];
+                                            @"jd":@(lon), @"wd":@(lat), @"queue":@(queue),
+                                            @"zdbj":@(zdbj > 0 ? zdbj : 35)} mutableCopy];
             [g_stations addObject:entry];
             if (g_stations.count <= 12) {
                 SecPanelLog(@"解析站点 %@", SecStationTitle(entry));
@@ -196,6 +199,35 @@ static NSDictionary *CurrentTarget(void) {
     return SpoofTarget();
 }
 
+static BOOL SecShouldJitterGps(void) {
+    return g_enabled || g_simulatingAuto;
+}
+
+static void SecSpoofedCoords(NSDictionary *t, double *outLat, double *outLon, BOOL jitter) {
+    double baseLat = [t[@"wd"] doubleValue];
+    double baseLon = [t[@"jd"] doubleValue];
+    if (!jitter) {
+        *outLat = baseLat;
+        *outLon = baseLon;
+        return;
+    }
+
+    double radiusM = [t[@"zdbj"] doubleValue];
+    if (radiusM <= 0 || radiusM > 800) radiusM = 35.0;
+    double maxM = radiusM * 0.4;
+    if (maxM < 10) maxM = 10;
+    if (maxM > 50) maxM = 50;
+
+    NSInteger i = g_gpsPulseIndex;
+    double angle = fmod(i * 0.9, 2.0 * M_PI);
+    double dist = maxM * (0.2 + 0.8 * ((i % 6) / 6.0));
+    double cosLat = cos(baseLat * M_PI / 180.0);
+    if (fabs(cosLat) < 0.01) cosLat = 0.01;
+
+    *outLat = baseLat + (dist * cos(angle)) / 111320.0;
+    *outLon = baseLon + (dist * sin(angle)) / (111320.0 * cosLat);
+}
+
 static NSString *SecPatchCoordField(NSString *raw, NSString *key, double value) {
     NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9.eE+-]+\"?", key];
     NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
@@ -217,6 +249,10 @@ static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
 
     double jd = [t[@"jd"] doubleValue];
     double wd = [t[@"wd"] doubleValue];
+    BOOL isCar = [url containsString:@"car/"];
+    if (isCar && SecShouldJitterGps()) {
+        SecSpoofedCoords(t, &wd, &jd, YES);
+    }
     NSString *zddm = [t[@"zddm"] description];
     NSString *out = raw;
 
@@ -311,30 +347,33 @@ static void NextStation(void) {
 }
 
 static void SecRefreshFakeLocation(void) {
-    g_fakeLocation = nil;
+    g_gpsPulseIndex++;
 }
 
 static CLLocation *SecFakeLocation(void) {
     NSDictionary *t = SpoofTarget();
     if (!t) return nil;
-    double lat = [t[@"wd"] doubleValue];
-    double lon = [t[@"jd"] doubleValue];
-    if (g_fakeLocation && lat == g_fakeLat && lon == g_fakeLon) {
-        return g_fakeLocation;
-    }
-    g_fakeLat = lat;
-    g_fakeLon = lon;
-    g_fakeLocation = [[CLLocation alloc] initWithLatitude:lat longitude:lon];
-    return g_fakeLocation;
+    double lat, lon;
+    SecSpoofedCoords(t, &lat, &lon, SecShouldJitterGps());
+    return [[CLLocation alloc] initWithLatitude:lat longitude:lon];
 }
 
 static void SecGpsPulseTick(NSTimer *timer) {
     (void)timer;
     if (!g_enabled) return;
     SecRefreshFakeLocation();
-    (void)SecFakeLocation();
     NSDictionary *t = DisplayStation();
-    if (t) SecPanelLog(@"GPS维持 %@", SecStationTitle(t));
+    if (!t) return;
+    double lat, lon;
+    SecSpoofedCoords(t, &lat, &lon, YES);
+    double baseLat = [t[@"wd"] doubleValue];
+    double baseLon = [t[@"jd"] doubleValue];
+    double cosLat = cos(baseLat * M_PI / 180.0);
+    if (fabs(cosLat) < 0.01) cosLat = 0.01;
+    double dLatM = (lat - baseLat) * 111320.0;
+    double dLonM = (lon - baseLon) * 111320.0 * cosLat;
+    double distM = sqrt(dLatM * dLatM + dLonM * dLonM);
+    SecPanelLog(@"GPS漂移 %@ ~%.0fm", SecStationTitle(t), distM);
 }
 
 static void SecStartGpsPulse(void) {
@@ -1111,9 +1150,11 @@ static CLLocation *(*orig_managerLocation)(id, SEL);
 static CLLocationCoordinate2D hook_coord(id self, SEL _cmd) {
     NSDictionary *t = SpoofTarget();
     if (t) {
+        double lat, lon;
+        SecSpoofedCoords(t, &lat, &lon, SecShouldJitterGps());
         CLLocationCoordinate2D c;
-        c.latitude = [t[@"wd"] doubleValue];
-        c.longitude = [t[@"jd"] doubleValue];
+        c.latitude = lat;
+        c.longitude = lon;
         return c;
     }
     return orig_coord(self, _cmd);
@@ -1121,13 +1162,21 @@ static CLLocationCoordinate2D hook_coord(id self, SEL _cmd) {
 
 static double hook_latitude(id self, SEL _cmd) {
     NSDictionary *t = SpoofTarget();
-    if (t) return [t[@"wd"] doubleValue];
+    if (t) {
+        double lat, lon;
+        SecSpoofedCoords(t, &lat, &lon, SecShouldJitterGps());
+        return lat;
+    }
     return orig_latitude(self, _cmd);
 }
 
 static double hook_longitude(id self, SEL _cmd) {
     NSDictionary *t = SpoofTarget();
-    if (t) return [t[@"jd"] doubleValue];
+    if (t) {
+        double lat, lon;
+        SecSpoofedCoords(t, &lat, &lon, SecShouldJitterGps());
+        return lon;
+    }
     return orig_longitude(self, _cmd);
 }
 
