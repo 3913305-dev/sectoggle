@@ -39,6 +39,8 @@ static UILabel *g_statusLabel = nil;
 static UILabel *g_logLabel = nil;
 static NSMutableArray<NSString *> *g_logLines = nil;
 static const NSUInteger kSecMaxLogLines = 10;
+static const NSInteger kSecMaxWalkNodes = 2500;
+static NSInteger g_walkNodeCount = 0;
 static NSString *g_lastDealType = nil;
 static NSString *g_lastDealClass = nil;
 static id g_dealTaskTarget = nil;
@@ -420,6 +422,7 @@ static NSInteger SecTapOpeInOnObject(id obj) {
 
 static void SecWalkCollect(id node, void (^visit)(id), NSMutableSet *seen) {
     if (!node || !visit) return;
+    if (g_walkNodeCount++ > kSecMaxWalkNodes) return;
     NSValue *key = [NSValue valueWithNonretainedObject:node];
     if ([seen containsObject:key]) return;
     [seen addObject:key];
@@ -462,6 +465,7 @@ static void SecWalkViewControllerTree(id node, void (^visit)(id), NSMutableSet *
 
 static void SecWalkWindows(void (^visit)(id)) {
     if (!visit) return;
+    g_walkNodeCount = 0;
     NSMutableSet *seen = [NSMutableSet set];
     SecForEachWindow(^(UIWindow *win) {
         SecWalkCollect(win, visit, seen);
@@ -469,18 +473,19 @@ static void SecWalkWindows(void (^visit)(id)) {
     });
 }
 
-static id SecResolveDealTaskTarget(void) {
+static id SecFastDealTaskTarget(void) {
     if (g_dealTaskTarget) return g_dealTaskTarget;
+    Class cls = NSClassFromString(@"XPDService");
+    id inst = SecSingletonFromClass(cls);
+    if (inst) g_dealTaskTarget = inst;
+    return inst;
+}
+
+static id SecResolveDealTaskTarget(void) {
+    id fast = SecFastDealTaskTarget();
+    if (fast) return fast;
 
     SEL dealSel = SecDealTaskSel();
-    Class svcCls = NSClassFromString(@"XPDService");
-    id singleton = SecSingletonFromClass(svcCls);
-    if (singleton && [singleton respondsToSelector:dealSel]) {
-        g_dealTaskTarget = singleton;
-        SecPanelLog(@"dealTask ← XPDService 单例");
-        return singleton;
-    }
-
     __block id found = nil;
     SecWalkWindows(^(id node) {
         if (found) return;
@@ -488,7 +493,7 @@ static id SecResolveDealTaskTarget(void) {
             found = node;
             return;
         }
-        for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
+        for (NSString *key in @[@"service", @"_service"]) {
             id svc = SecKVCTry(node, key);
             if (svc && [svc respondsToSelector:dealSel]) {
                 found = svc;
@@ -647,14 +652,11 @@ static NSInteger SecTriggerAMapGeoFenceStayed(void) {
     return n > 0 ? 1 : 0;
 }
 
-static NSInteger SecDirectDealTask(void) {
-    id target = SecResolveDealTaskTarget();
+static NSInteger SecDirectDealTaskOn(id target) {
     if (!target) return 0;
 
     NSDictionary *t = DisplayStation();
     if (!t) return 0;
-
-    SecCollectTaskIdsFromUI();
 
     NSString *bcdh = g_taskBcdh;
     NSString *bcmxdh = g_taskBcmxdh;
@@ -668,7 +670,7 @@ static NSInteger SecDirectDealTask(void) {
         if (err) {
             SecPanelLog(@"dealTask 失败 %@", err.localizedDescription);
         } else {
-            SecPanelLog(@"dealTask 已请求");
+            SecPanelLog(@"dealTask 完成");
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             NSString *tip = err ? [NSString stringWithFormat:@"dealTask 失败: %@", err.localizedDescription] :
@@ -681,8 +683,7 @@ static NSInteger SecDirectDealTask(void) {
     SEL shortSel = @selector(bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
 
     if (!bcdh.length || !bcmxdh.length) {
-        SecPanelLog(@"警告: bcdh=%@ bcmxdh=%@ (任务单号缺失可能导致 dealTask 无效)",
-              bcdh, bcmxdh);
+        SecPanelLog(@"缺 bcdh/bcmxdh: %@ / %@", bcdh, bcmxdh);
     }
 
     @try {
@@ -692,23 +693,25 @@ static NSInteger SecDirectDealTask(void) {
             ((void (*)(id, SEL, id, id, id, id, id, id, id, id))objc_msgSend)(
                 target, fullSel,
                 bcdh ?: @"", bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, completion);
-            SecPanelLog(@"直接 dealTask bcdh=%@ bcmxdh=%@ zddm=%@ dealType=%@",
-                  bcdh, bcmxdh, zddm, dealType);
+            SecPanelLog(@"dealTask 已调用 zddm=%@ type=%@", zddm, dealType);
             return 1;
         }
         if ([target respondsToSelector:shortSel]) {
             ((void (*)(id, SEL, id, id, id, id, id, id, id))objc_msgSend)(
                 target, shortSel,
                 bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, completion);
-            SecPanelLog(@"直接 bcmxdh dealTask bcmxdh=%@ zddm=%@ dealType=%@",
-                  bcmxdh, zddm, dealType);
+            SecPanelLog(@"dealTask(短) zddm=%@ type=%@", zddm, dealType);
             return 1;
         }
 #pragma clang diagnostic pop
     } @catch (NSException *e) {
-        SecPanelLog(@"直接 dealTask 异常: %@", e);
+        SecPanelLog(@"dealTask 异常: %@", e);
     }
     return 0;
+}
+
+static NSInteger SecDirectDealTask(void) {
+    return SecDirectDealTaskOn(SecFastDealTaskTarget());
 }
 
 static void SecShowSimResult(NSString *msg) {
@@ -723,36 +726,36 @@ static void SecShowSimResult(NSString *msg) {
 }
 
 static void SecSimulateAutoArriveImpl(void) {
-    SecInstallDealTaskHooks();
-    SecInstallStayedHooks();
-    SecCollectTaskIdsFromUI();
+    if (!g_taskBcmxdh.length) {
+        SecShowSimResult(@"缺少 bcmxdh，请刷新任务页");
+        return;
+    }
 
-    id dealTarget = SecResolveDealTaskTarget();
+    id target = SecFastDealTaskTarget();
+    if (!target) {
+        SecShowSimResult(@"无 XPDService，请先进任务页");
+        return;
+    }
+
     g_simulatingAuto = YES;
     g_forceAutoCzlx = YES;
+    SecPanelLog(@"后台提交 dealTask…");
 
-    NSInteger n = SecDirectDealTask();
-    if (n == 0) {
-        n = SecTriggerAutoStayedOnce();
-    }
-    if (n == 0) {
-        n = SecTriggerAMapGeoFenceStayed();
-    }
-
-    if (n == 0) {
-        SecClearSimFlags();
-        NSString *why = @"自动链路未触发";
-        if (!dealTarget) why = @"未找到 dealTask 对象";
-        else if (!g_taskBcmxdh.length) why = @"缺少 bcmxdh，请刷新任务页";
-        SecShowSimResult([NSString stringWithFormat:@"%@，可开关ON等围栏", why]);
-    } else {
-        SecScheduleClearSimFlags();
-        if (g_lastDealType.length) {
-            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", g_lastDealType]);
-        } else {
-            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", SecAutoDealType()]);
+    id strongTarget = target;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            NSInteger n = SecDirectDealTaskOn(strongTarget);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (n == 0) {
+                    SecClearSimFlags();
+                    SecShowSimResult(@"dealTask 调用失败");
+                } else {
+                    SecScheduleClearSimFlags();
+                    SecShowSimResult(@"已提交 dealTask");
+                }
+            });
         }
-    }
+    });
 }
 
 static void SecSimulateAutoArrive(void) {
@@ -798,8 +801,6 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
             useZddm = t[@"zddm"] ?: zddm;
             useLat = t[@"wd"] ?: lat;
             useLon = t[@"jd"] ?: lon;
-            SecPanelLog(@"统一站点 → %@ zddm=%@ wd=%@ jd=%@",
-                  SecStationTitle(t), useZddm, useLat, useLon);
         }
     }
 
@@ -807,7 +808,6 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
     if (g_simulatingAuto || g_inAutoStayedChain || g_forceAutoCzlx) {
         if (SecIsManualDealType(dealType)) {
             useType = SecAutoDealType();
-            SecPanelLog(@"强制自动 dealType %@ → %@", dealType, useType);
         }
     }
 
@@ -981,6 +981,15 @@ static void SecCreatePanel(void) {
         if (t) {
             SecPanelLog(@"GPS→%@", SecStationTitle(t));
         }
+        if (!g_taskBcmxdh.length) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                SecCollectTaskIdsFromUI();
+                if (g_taskBcmxdh.length) {
+                    SecPanelLog(@"已获取 bcmxdh %@", g_taskBcmxdh);
+                }
+            });
+        }
     }
 }
 
@@ -1098,10 +1107,12 @@ static void SecInstallHooks(void) {
         method_setImplementation(m3, (IMP)hook_jsonData);
     }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         SecInstallDealTaskHooks();
         SecInstallStayedHooks();
-        SecInstallTapOpeInHooks();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SecPanelLog(@"业务 Hook 就绪");
+        });
     });
 
     SecPanelLog(@"Hooks 安装完成");
