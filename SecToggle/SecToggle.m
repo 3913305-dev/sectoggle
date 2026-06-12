@@ -30,6 +30,7 @@ static void SecDeactivateClock(void);
 static BOOL SecPlateIsCurrTaskVC(id obj);
 static BOOL SecPlateScanConfirmed(id obj);
 static BOOL SecPlateIsDispatchVehCheckContext(id obj);
+static BOOL SecPlateIsScanConfirmPage(id obj);
 static void SecApplyDispatchScanConfirmUI(id obj, NSString *plate);
 static void SecInvokePlateScanForPage(id page, NSString *plate, id color);
 static void SecPanelLog(NSString *format, ...);
@@ -1619,6 +1620,8 @@ static NSSet *SecPlateSkipScanVCNames(void) {
     dispatch_once(&onceToken, ^{
         names = [NSSet setWithObjects:
                  @"XPDDispatchVehCheckVC",
+                 @"XPDDepartVC",
+                 @"XPDReturnVehVC",
                  nil];
     });
     return names;
@@ -1653,20 +1656,59 @@ static BOOL SecPlateIsCurrTaskVC(id obj) {
     return NO;
 }
 
+static BOOL SecPlatePageHasCheckCell(UIViewController *vc) {
+    if (![vc isKindOfClass:[UIViewController class]]) return NO;
+    if (!vc.isViewLoaded) {
+        (void)vc.view;
+    }
+    if (!vc.view) return NO;
+    for (UIView *sub in vc.view.subviews) {
+        if (![sub isKindOfClass:[UITableView class]]) continue;
+        for (UITableViewCell *cell in ((UITableView *)sub).visibleCells) {
+            NSString *ccn = NSStringFromClass([cell class]);
+            if ([ccn containsString:@"DispathVehCheckCell"] ||
+                [ccn containsString:@"DispatchVehCheckCell"]) {
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
+static BOOL SecPlateIsScanConfirmPage(id obj) {
+    if (!obj) return NO;
+    NSString *cn = NSStringFromClass([obj class]);
+    if ([cn containsString:@"DispathVehCheckCell"] ||
+        [cn containsString:@"DispatchVehCheckCell"]) {
+        return YES;
+    }
+    if ([SecPlateSkipScanVCNames() containsObject:cn]) return YES;
+
+    UIViewController *vc = [obj isKindOfClass:[UIViewController class]] ? (UIViewController *)obj
+                                                                         : SecViewControllerForResponder(obj);
+    if (!vc) return NO;
+
+    cn = NSStringFromClass([vc class]);
+    if ([SecPlateSkipScanVCNames() containsObject:cn]) return YES;
+    if ([vc respondsToSelector:@selector(setIsCheckedDispatchVeh:)]) return YES;
+    if (SecKVCTry(vc, @"checkModel") != nil) return YES;
+    if (SecKVCTry(vc, @"cntDispath") != nil) return YES;
+    if (SecPlatePageHasCheckCell(vc)) return YES;
+    return NO;
+}
+
 static BOOL SecPlateSkipScanTarget(id obj) {
-    return SecPlateIsDispatchVehCheckContext(obj);
+    return SecPlateIsScanConfirmPage(obj);
 }
 
 static BOOL SecPlateIsDispatchVehCheckContext(id obj) {
     if (!obj) return NO;
-    NSString *cn = NSStringFromClass([obj class]);
-    if ([SecPlateSkipScanVCNames() containsObject:cn]) return YES;
-    if ([cn isEqualToString:@"XPDDispathVehCheckCell"]) return YES;
+    if (SecPlateIsScanConfirmPage(obj)) return YES;
 
     UIViewController *vc = [obj isKindOfClass:[UIViewController class]] ? (UIViewController *)obj
                                                                          : SecViewControllerForResponder(obj);
     while (vc) {
-        if ([SecPlateSkipScanVCNames() containsObject:NSStringFromClass([vc class])]) return YES;
+        if (SecPlateIsScanConfirmPage(vc)) return YES;
         vc = vc.parentViewController;
     }
 
@@ -1674,10 +1716,10 @@ static BOOL SecPlateIsDispatchVehCheckContext(id obj) {
                                                       : SecViewControllerForResponder(obj);
     if (vc.navigationController) {
         for (UIViewController *p in vc.navigationController.viewControllers) {
-            if ([SecPlateSkipScanVCNames() containsObject:NSStringFromClass([p class])]) return YES;
+            if (SecPlateIsScanConfirmPage(p)) return YES;
         }
         UIViewController *top = vc.navigationController.visibleViewController;
-        if (top && [SecPlateSkipScanVCNames() containsObject:NSStringFromClass([top class])]) return YES;
+        if (top && SecPlateIsScanConfirmPage(top)) return YES;
     }
     return NO;
 }
@@ -1723,10 +1765,29 @@ static BOOL SecLooksLikePlate(NSString *s) {
     return YES;
 }
 
+static NSString *SecStripPlateDecorations(NSString *raw) {
+    if (!raw.length) return raw;
+    NSString *t = raw;
+    static NSRegularExpression *parenRe;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        parenRe = [NSRegularExpression regularExpressionWithPattern:@"\\([^)]*\\)"
+                                                            options:0
+                                                              error:nil];
+    });
+    if (parenRe) {
+        t = [parenRe stringByReplacingMatchesInString:t
+                                              options:0
+                                                range:NSMakeRange(0, t.length)
+                                         withTemplate:@""];
+    }
+    return [[t stringByReplacingOccurrencesOfString:@" " withString:@""]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
 static NSString *SecExtractPlateFromText(NSString *raw) {
     if (!raw.length) return nil;
-    NSString *compact = [[raw stringByReplacingOccurrencesOfString:@" " withString:@""]
-                         stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *compact = SecStripPlateDecorations(raw);
     if (SecLooksLikePlate(compact)) return compact;
 
     static NSRegularExpression *plateRe;
@@ -1981,11 +2042,11 @@ static NSString *SecResolvePlateForObject(id obj) {
 
 static id SecReadPlateColorFromObject(id obj) {
     if (!obj) return nil;
-    id cpys = SecKVCTry(obj, @"cpys");
-    if (cpys && cpys != (id)kCFNull) return cpys;
-    id color = SecKVCTry(obj, @"carColor") ?: SecKVCTry(obj, @"plateColor") ?: SecKVCTry(obj, @"cpysdm");
-    if (color && color != (id)kCFNull) return color;
-    for (NSString *k in @[@"model", @"checkModel", @"vehDic", @"task", @"taskModel", @"selectVehDic"]) {
+    for (NSString *k in @[@"cpys", @"c_cpys", @"n_cpys", @"n_sgcpys", @"carColor", @"plateColor", @"cpysdm"]) {
+        id v = SecKVCTry(obj, k);
+        if (v && v != (id)kCFNull) return v;
+    }
+    for (NSString *k in @[@"model", @"checkModel", @"checkData", @"vehDic", @"task", @"taskModel", @"selectVehDic"]) {
         id m = SecKVCTry(obj, k);
         id c = SecReadPlateColorFromObject(m);
         if (c) return c;
@@ -2097,7 +2158,7 @@ static BOOL SecPlateScanConfirmed(id obj) {
 }
 
 static void SecApplyDispatchScanConfirmUI(id obj, NSString *plate) {
-    if (!obj || !plate.length || !SecPlateIsDispatchVehCheckContext(obj)) return;
+    if (!obj || !plate.length || !SecPlateIsScanConfirmPage(obj)) return;
 
     NSArray *labelKeys = @[
         @"licensePlateNumLab", @"labRegname", @"labRegname1",
@@ -2260,19 +2321,76 @@ static void SecSchedulePlateAutoFill(id obj) {
                        dispatch_get_main_queue(), ^{
             if (SecTryAutoFillPlateOnObject(weakObj, NO)) return;
             if (attempt == 3) {
-                SecPanelLog(@"扫牌：未读到车牌，请点扫一扫");
+                NSString *pageCn = [weakObj isKindOfClass:[UIViewController class]]
+                    ? NSStringFromClass([weakObj class]) : @"?";
+                SecPanelLog(@"扫牌：未读到车牌(%@)", pageCn);
             }
         });
     }
 }
 
-static void (*orig_dispatchVehCheckAppear)(id, SEL, BOOL);
-static void (*orig_plateCameraAppear)(id, SEL, BOOL);
+static NSMutableDictionary *g_scanPageAppearOrigs = nil;
 
-static void hook_dispatchVehCheckAppear(id self, SEL _cmd, BOOL animated) {
-    orig_dispatchVehCheckAppear(self, _cmd, animated);
-    if (g_licensed) SecSchedulePlateAutoFill(self);
+static void hook_scanPageAppear(id self, SEL _cmd, BOOL animated) {
+    NSString *cn = NSStringFromClass([self class]);
+    IMP orig = NULL;
+    if (g_scanPageAppearOrigs) {
+        NSValue *v = g_scanPageAppearOrigs[cn];
+        if (v) orig = [v pointerValue];
+    }
+    if (orig) ((void (*)(id, SEL, BOOL))orig)(self, _cmd, animated);
+    if (g_licensed && SecPlateIsScanConfirmPage(self)) {
+        SecSchedulePlateAutoFill(self);
+    }
 }
+
+static void SecHookScanPageViewDidAppear(Class cls) {
+    if (!cls) return;
+    Method appear = class_getInstanceMethod(cls, @selector(viewDidAppear:));
+    if (!appear) return;
+    IMP orig = method_getImplementation(appear);
+    if (orig == (IMP)hook_scanPageAppear) return;
+    if (!g_scanPageAppearOrigs) g_scanPageAppearOrigs = [NSMutableDictionary dictionary];
+    g_scanPageAppearOrigs[NSStringFromClass(cls)] = [NSValue valueWithPointer:orig];
+    method_setImplementation(appear, (IMP)hook_scanPageAppear);
+    SecDebugLog(@"Hook %@ viewDidAppear (scan page)", NSStringFromClass(cls));
+}
+
+static void (*orig_navPushVC)(id, SEL, UIViewController *, BOOL);
+
+static void hook_navPushVC(id self, SEL _cmd, UIViewController *vc, BOOL animated) {
+    orig_navPushVC(self, _cmd, vc, animated);
+    if (g_licensed && vc && SecPlateIsScanConfirmPage(vc)) {
+        SecSchedulePlateAutoFill(vc);
+    }
+}
+
+static void (*orig_startOrEndTask)(id, SEL, id);
+static void (*orig_startOrEndTaskExt)(id, SEL, id, id, id);
+
+static void SecSchedulePlateAutoFillAfterNav(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        SecForEachWindow(^(UIWindow *win) {
+            UIViewController *top = SecTopViewController(win.rootViewController);
+            if (top && SecPlateIsScanConfirmPage(top)) {
+                SecSchedulePlateAutoFill(top);
+            }
+        });
+    });
+}
+
+static void hook_startOrEndTask(id self, SEL _cmd, id info) {
+    orig_startOrEndTask(self, _cmd, info);
+    if (g_licensed) SecSchedulePlateAutoFillAfterNav();
+}
+
+static void hook_startOrEndTaskExt(id self, SEL _cmd, id a, id b, id c) {
+    orig_startOrEndTaskExt(self, _cmd, a, b, c);
+    if (g_licensed) SecSchedulePlateAutoFillAfterNav();
+}
+
+static void (*orig_plateCameraAppear)(id, SEL, BOOL);
 
 static void hook_plateCameraAppear(id self, SEL _cmd, BOOL animated) {
     orig_plateCameraAppear(self, _cmd, animated);
@@ -2281,7 +2399,7 @@ static void hook_plateCameraAppear(id self, SEL _cmd, BOOL animated) {
 
 static BOOL SecPlateHookClass(Class cls) {
     NSString *cn = NSStringFromClass(cls);
-    if ([cn isEqualToString:@"XPDDispatchVehCheckVC"]) return YES;
+    if ([SecPlateSkipScanVCNames() containsObject:cn]) return YES;
     if ([cn isEqualToString:@"XPDDispathVehCheckCell"]) return YES;
     if ([cn hasPrefix:@"WTPlate"]) return YES;
     return NO;
@@ -2332,14 +2450,8 @@ static void SecInstallPlateHooks(void) {
     static BOOL installed = NO;
     if (installed) return;
 
-    Class checkVC = NSClassFromString(@"XPDDispatchVehCheckVC");
-    if (checkVC) {
-        Method appear = class_getInstanceMethod(checkVC, @selector(viewDidAppear:));
-        if (appear) {
-            orig_dispatchVehCheckAppear = (void (*)(id, SEL, BOOL))method_getImplementation(appear);
-            method_setImplementation(appear, (IMP)hook_dispatchVehCheckAppear);
-            SecDebugLog(@"Hook XPDDispatchVehCheckVC viewDidAppear:");
-        }
+    for (NSString *name in SecPlateSkipScanVCNames()) {
+        SecHookScanPageViewDidAppear(NSClassFromString(name));
     }
 
     Class cameraVC = NSClassFromString(@"WTPlateIDCameraViewController");
@@ -2349,6 +2461,30 @@ static void SecInstallPlateHooks(void) {
             orig_plateCameraAppear = (void (*)(id, SEL, BOOL))method_getImplementation(appear);
             method_setImplementation(appear, (IMP)hook_plateCameraAppear);
             SecDebugLog(@"Hook WTPlateIDCameraViewController viewDidAppear:");
+        }
+    }
+
+    Method navPush = class_getInstanceMethod([UINavigationController class],
+                                             @selector(pushViewController:animated:));
+    if (navPush) {
+        orig_navPushVC = (void (*)(id, SEL, UIViewController *, BOOL))method_getImplementation(navPush);
+        method_setImplementation(navPush, (IMP)hook_navPushVC);
+        SecDebugLog(@"Hook UINavigationController pushViewController:");
+    }
+
+    Class currTask = NSClassFromString(@"XPDCurrTaskVC");
+    if (currTask) {
+        Method m = class_getInstanceMethod(currTask, @selector(startOrEndTask:));
+        if (m) {
+            orig_startOrEndTask = (void (*)(id, SEL, id))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_startOrEndTask);
+            SecDebugLog(@"Hook XPDCurrTaskVC startOrEndTask:");
+        }
+        m = class_getInstanceMethod(currTask, @selector(startOrEndTask:ycqk:otherYcqk:));
+        if (m) {
+            orig_startOrEndTaskExt = (void (*)(id, SEL, id, id, id))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_startOrEndTaskExt);
+            SecDebugLog(@"Hook XPDCurrTaskVC startOrEndTask:ycqk:otherYcqk:");
         }
     }
 
@@ -2407,7 +2543,7 @@ static void SecInstallPlateHooks(void) {
     }
     free(classes);
     installed = YES;
-    SecDebugLog(@"扫牌跳过 Hook 就绪（开始/结束任务）");
+    SecDebugLog(@"扫牌跳过 Hook 就绪（开始/结束任务验车页）");
 }
 
 #pragma mark - UI
