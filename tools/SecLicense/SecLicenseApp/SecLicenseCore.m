@@ -32,10 +32,37 @@ static BOOL SecLicenseValidExpiry(NSString *yyyymmdd) {
     return [f dateFromString:yyyymmdd] != nil;
 }
 
+static NSString *SecLicenseCompactHex(NSString *raw) {
+    NSMutableString *s = [NSMutableString string];
+    NSString *upper = [raw uppercaseString];
+    for (NSUInteger i = 0; i < upper.length; i++) {
+        unichar c = [upper characterAtIndex:i];
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) {
+            [s appendFormat:@"%C", c];
+        }
+    }
+    return s;
+}
+
 static BOOL SecLicenseParseCode(NSString *raw, NSString **outHex16, NSString **outExpiry) {
     if (outHex16) *outHex16 = nil;
     if (outExpiry) *outExpiry = nil;
     if (!raw.length) return NO;
+
+    NSString *compact = SecLicenseCompactHex(raw);
+    if (compact.length == 16) {
+        if (outHex16) *outHex16 = compact;
+        return YES;
+    }
+    if (compact.length == 24) {
+        NSString *hex = [compact substringToIndex:16];
+        NSString *expiry = [compact substringFromIndex:16];
+        if (SecLicenseValidExpiry(expiry)) {
+            if (outHex16) *outHex16 = hex;
+            if (outExpiry) *outExpiry = expiry;
+            return YES;
+        }
+    }
 
     NSArray *parts = [[raw uppercaseString] componentsSeparatedByString:@"-"];
     NSMutableArray *clean = [NSMutableArray array];
@@ -127,6 +154,7 @@ BOOL SecLicenseIsExpired(NSString *yyyymmdd) {
     NSDateFormatter *f = [[NSDateFormatter alloc] init];
     f.dateFormat = @"yyyyMMdd";
     f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    f.timeZone = [NSTimeZone localTimeZone];
     NSDate *day = [f dateFromString:yyyymmdd];
     if (!day) return YES;
     NSDate *end = [day dateByAddingTimeInterval:86400.0 - 1.0];

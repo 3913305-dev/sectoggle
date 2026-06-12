@@ -942,16 +942,37 @@ static void SecSetPanelVisible(BOOL visible) {
     if (g_panel) g_panel.hidden = !visible;
 }
 
+static NSString *g_lastActivateError = nil;
+
 static BOOL SecTryActivate(NSString *code) {
+    g_lastActivateError = nil;
     if (!g_deviceUUID.length) g_deviceUUID = [SecDeviceID keychainDeviceUUID];
     NSString *trimmed = [code stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!trimmed.length) return NO;
-    NSString *expiry = SecLicenseExpiryFromCode(trimmed);
-    if (expiry.length && SecLicenseIsExpired(expiry)) return NO;
-    if (!SecLicenseVerify(g_deviceUUID, trimmed, kSecLicenseDefaultSecret)) return NO;
+    if (!trimmed.length) {
+        g_lastActivateError = @"请输入激活码";
+        return NO;
+    }
     NSString *formatted = SecLicenseCanonicalCode(trimmed);
-    if (!formatted.length) return NO;
-    if (![SecDeviceID saveActivationCode:formatted]) return NO;
+    if (!formatted.length) {
+        g_lastActivateError = @"激活码格式错误\n应为 XXXX-XXXX-XXXX-XXXX-YYYYMMDD";
+        return NO;
+    }
+    NSString *expiry = SecLicenseExpiryFromCode(formatted);
+    if (expiry.length && SecLicenseIsExpired(expiry)) {
+        g_lastActivateError = [NSString stringWithFormat:@"激活码已过期（%@）", SecLicenseExpiryDisplay(expiry)];
+        return NO;
+    }
+    if (!SecLicenseVerify(g_deviceUUID, formatted, kSecLicenseDefaultSecret)) {
+        NSString *shortCode = SecLicenseDeviceCodeShort(g_deviceUUID) ?: @"—";
+        g_lastActivateError = [NSString stringWithFormat:
+            @"与当前设备 UUID 不匹配\n发码时请粘贴面板「复制 UUID」的内容\n本机短码：%@\n勿用 IDFV 或 Sec发码 本机 UUID",
+            shortCode];
+        return NO;
+    }
+    if (![SecDeviceID saveActivationCode:formatted]) {
+        g_lastActivateError = @"保存激活码失败，请重试";
+        return NO;
+    }
     g_licensed = YES;
     SecInstallHooks();
     SecUpdateLicenseUI();
@@ -962,6 +983,12 @@ static BOOL SecTryActivate(NSString *code) {
 static void SecUpdateLicenseUI(void) {
     if (!g_panel) return;
     BOOL licensed = g_licensed;
+    CGFloat pw = 280;
+    CGFloat ph = licensed ? 272 : 128;
+    CGRect f = g_panel.frame;
+    g_panel.frame = CGRectMake(f.origin.x, f.origin.y, pw, ph);
+    g_licenseBox.frame = CGRectMake(0, 0, pw, ph);
+    g_mainBox.frame = CGRectMake(0, 0, pw, ph);
     g_licenseBox.hidden = licensed;
     g_mainBox.hidden = !licensed;
     if (g_toggleSwitch) g_toggleSwitch.enabled = licensed;
@@ -1068,27 +1095,20 @@ static void SecEnsureUI(void) {
     licTitle.font = [UIFont boldSystemFontOfSize:13];
     [g_licenseBox addSubview:licTitle];
 
-    UILabel *licHint = [[UILabel alloc] initWithFrame:CGRectMake(8, 26, pw - 16, 28)];
-    licHint.text = @"复制下方 UUID 到 Windows 发码工具，再点「输入激活码」";
-    licHint.textColor = [UIColor colorWithWhite:0.75 alpha:1];
-    licHint.font = [UIFont systemFontOfSize:9];
-    licHint.numberOfLines = 2;
-    [g_licenseBox addSubview:licHint];
-
-    g_licenseUuidLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 56, pw - 16, 34)];
+    g_licenseUuidLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 28, pw - 16, 34)];
     g_licenseUuidLabel.textColor = [UIColor colorWithRed:0.55 green:0.85 blue:1.0 alpha:1];
     g_licenseUuidLabel.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
     g_licenseUuidLabel.numberOfLines = 2;
     g_licenseUuidLabel.lineBreakMode = NSLineBreakByCharWrapping;
     [g_licenseBox addSubview:g_licenseUuidLabel];
 
-    g_licenseShortLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 92, pw - 16, 14)];
+    g_licenseShortLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 64, pw - 16, 14)];
     g_licenseShortLabel.textColor = [UIColor colorWithWhite:0.65 alpha:1];
     g_licenseShortLabel.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightMedium];
     [g_licenseBox addSubview:g_licenseShortLabel];
 
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(8, 112, (pw - 22) / 2.0, 32);
+    copyBtn.frame = CGRectMake(8, 84, (pw - 22) / 2.0, 32);
     [copyBtn setTitle:@"复制 UUID" forState:UIControlStateNormal];
     [copyBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     copyBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
@@ -1098,7 +1118,7 @@ static void SecEnsureUI(void) {
     [g_licenseBox addSubview:copyBtn];
 
     UIButton *actBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    actBtn.frame = CGRectMake(14 + (pw - 22) / 2.0, 112, (pw - 22) / 2.0, 32);
+    actBtn.frame = CGRectMake(14 + (pw - 22) / 2.0, 84, (pw - 22) / 2.0, 32);
     [actBtn setTitle:@"输入激活码" forState:UIControlStateNormal];
     [actBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     actBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
@@ -1106,18 +1126,6 @@ static void SecEnsureUI(void) {
     actBtn.layer.cornerRadius = 6;
     [actBtn addTarget:[SecToggleHandler shared] action:@selector(onActivate:) forControlEvents:UIControlEventTouchUpInside];
     [g_licenseBox addSubview:actBtn];
-
-    UIView *licLogBg = [[UIView alloc] initWithFrame:CGRectMake(6, 152, pw - 12, ph - 158)];
-    licLogBg.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    licLogBg.layer.cornerRadius = 6;
-    [g_licenseBox addSubview:licLogBg];
-
-    UILabel *licLog = [[UILabel alloc] initWithFrame:CGRectMake(8, 6, pw - 28, ph - 170)];
-    licLog.text = @"IDFV 仅参考；发码以 UUID 为准。抹机后需重新发码。";
-    licLog.textColor = [UIColor colorWithWhite:0.55 alpha:1];
-    licLog.font = [UIFont systemFontOfSize:9];
-    licLog.numberOfLines = 0;
-    [licLogBg addSubview:licLog];
 
     g_mainBox = [[UIView alloc] initWithFrame:CGRectMake(0, 0, pw, ph)];
     g_mainBox.backgroundColor = UIColor.clearColor;
@@ -1335,9 +1343,9 @@ static void SecEnsureUI(void) {
     [ac addAction:[UIAlertAction actionWithTitle:@"激活" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         NSString *code = ac.textFields.firstObject.text;
         if (SecTryActivate(code)) return;
-        SecPanelLog(@"激活码无效或已过期");
+        SecPanelLog(@"激活失败：%@", g_lastActivateError ?: @"未知错误");
         UIAlertController *err = [UIAlertController alertControllerWithTitle:@"激活失败"
-                                                                     message:@"请核对 UUID、密钥，或确认激活码未过期"
+                                                                     message:g_lastActivateError ?: @"请核对 UUID 与激活码"
                                                               preferredStyle:UIAlertControllerStyleAlert];
         [err addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *vc = SecPresenterVC();

@@ -65,6 +65,15 @@ def format_groups(hex16: str) -> str:
 
 
 def parse_activation_code(raw: str) -> tuple[str, str | None]:
+    compact = re.sub(r"[^0-9A-Fa-f]", "", raw.strip())
+    if len(compact) == 16:
+        return compact.upper(), None
+    if len(compact) == 24:
+        hex16 = compact[:16].upper()
+        expiry = compact[16:]
+        validate_expiry_yyyymmdd(expiry)
+        return hex16, expiry
+
     text = raw.strip().upper().replace(" ", "")
     parts = [p for p in text.split("-") if p]
     if len(parts) == 4:
