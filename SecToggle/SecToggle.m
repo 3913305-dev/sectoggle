@@ -54,6 +54,7 @@ static NSString *g_taskBcmxdh = nil;
 static BOOL g_simulatingAuto = NO;
 static BOOL g_inAutoStayedChain = NO;
 static BOOL g_forceAutoCzlx = NO;
+static BOOL g_simInFlight = NO;
 static NSTimeInterval g_lastSimTime = 0;
 static CLLocation *g_fakeLocation = nil;
 static NSTimer *g_gpsPulseTimer = nil;
@@ -81,6 +82,7 @@ static void SecClearSimFlags(void) {
     g_simulatingAuto = NO;
     g_inAutoStayedChain = NO;
     g_forceAutoCzlx = NO;
+    g_simInFlight = NO;
 }
 
 static void SecScheduleClearSimFlags(void) {
@@ -562,47 +564,46 @@ static void SecWalkWindows(void (^visit)(id)) {
     });
 }
 
-static void SecEnumerateViewControllers(void (^block)(UIViewController *vc)) {
-    if (!block) return;
-    SecForEachWindow(^(UIWindow *win) {
-        NSMutableArray *stack = [NSMutableArray array];
-        if (win.rootViewController) [stack addObject:win.rootViewController];
-        while (stack.count) {
-            UIViewController *vc = stack.lastObject;
-            [stack removeLastObject];
-            if (!vc) continue;
-            block(vc);
-            if (vc.presentedViewController) [stack addObject:vc.presentedViewController];
-            if ([vc isKindOfClass:[UINavigationController class]]) {
-                [stack addObjectsFromArray:[(UINavigationController *)vc viewControllers]];
-            } else if ([vc isKindOfClass:[UITabBarController class]]) {
-                [stack addObjectsFromArray:[(UITabBarController *)vc viewControllers]];
-            }
-            if (vc.childViewControllers.count) {
-                [stack addObjectsFromArray:vc.childViewControllers];
-            }
+static UIViewController *SecTopViewController(UIViewController *vc) {
+    if (!vc) return nil;
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        return SecTopViewController([(UINavigationController *)vc visibleViewController]);
+    }
+    if ([vc isKindOfClass:[UITabBarController class]]) {
+        return SecTopViewController([(UITabBarController *)vc selectedViewController]);
+    }
+    if (vc.presentedViewController) {
+        return SecTopViewController(vc.presentedViewController);
+    }
+    return vc;
+}
+
+static id SecServiceFromViewController(UIViewController *vc, SEL dealSel, BOOL logHit) {
+    if (!vc) return nil;
+    NSString *cn = NSStringFromClass([vc class]);
+    if (![cn hasPrefix:@"XPD"]) return nil;
+    for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
+        id svc = SecKVCTry(vc, key);
+        if (svc && [svc respondsToSelector:dealSel]) {
+            if (logHit) SecPanelLog(@"service ← %@.%@", cn, key);
+            return svc;
         }
-    });
+    }
+    if ([vc respondsToSelector:dealSel]) {
+        if (logHit) SecPanelLog(@"dealTask ← %@", cn);
+        return vc;
+    }
+    return nil;
 }
 
 static id SecFindServiceFromTaskPages(void) {
     SEL dealSel = SecDealTaskSel();
     __block id found = nil;
-    SecEnumerateViewControllers(^(UIViewController *vc) {
+    SecForEachWindow(^(UIWindow *win) {
         if (found) return;
-        NSString *cn = NSStringFromClass([vc class]);
-        if (![cn hasPrefix:@"XPD"]) return;
-        for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
-            id svc = SecKVCTry(vc, key);
-            if (svc && [svc respondsToSelector:dealSel]) {
-                found = svc;
-                SecPanelLog(@"service ← %@.%@", cn, key);
-                return;
-            }
-        }
-        if ([vc respondsToSelector:dealSel]) {
-            found = vc;
-            SecPanelLog(@"dealTask ← %@", cn);
+        UIViewController *top = SecTopViewController(win.rootViewController);
+        for (UIViewController *vc = top; vc && !found; vc = vc.parentViewController) {
+            found = SecServiceFromViewController(vc, dealSel, YES);
         }
     });
     if (found) g_dealTaskTarget = found;
@@ -646,17 +647,30 @@ static id SecResolveDealTaskTarget(void) {
     return found;
 }
 
+static void SecCollectTaskIdsFromObject(id obj) {
+    if (!obj) return;
+    if (!g_taskBcdh.length) {
+        g_taskBcdh = SecStringFromKV(obj, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh", @"c_bcdh"]);
+    }
+    if (!g_taskBcmxdh.length) {
+        g_taskBcmxdh = SecStringFromKV(obj, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh", @"c_bcmxdh"]);
+    }
+}
+
 static void SecCollectTaskIdsFromUI(void) {
-    SecEnumerateViewControllers(^(UIViewController *vc) {
-        if (!g_taskBcdh.length) {
-            g_taskBcdh = SecStringFromKV(vc, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh", @"c_bcdh"]);
-        }
-        if (!g_taskBcmxdh.length) {
-            g_taskBcmxdh = SecStringFromKV(vc, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh", @"c_bcmxdh"]);
-        }
-        if (!g_dealTaskTarget && SecIsXPDObject(vc)) {
-            id svc = SecKVCTry(vc, @"service") ?: SecKVCTry(vc, @"_service");
-            if (svc) g_dealTaskTarget = svc;
+    if (g_dealTaskTarget) {
+        SecCollectTaskIdsFromObject(g_dealTaskTarget);
+    }
+    SecForEachWindow(^(UIWindow *win) {
+        if (g_taskBcdh.length && g_taskBcmxdh.length && g_dealTaskTarget) return;
+        UIViewController *top = SecTopViewController(win.rootViewController);
+        for (UIViewController *vc = top; vc; vc = vc.parentViewController) {
+            SecCollectTaskIdsFromObject(vc);
+            if (!g_dealTaskTarget && SecIsXPDObject(vc)) {
+                id svc = SecKVCTry(vc, @"service") ?: SecKVCTry(vc, @"_service");
+                if (svc) g_dealTaskTarget = svc;
+            }
+            if (g_taskBcdh.length && g_taskBcmxdh.length && g_dealTaskTarget) break;
         }
     });
 }
@@ -862,28 +876,49 @@ static void SecShowSimResult(NSString *msg) {
 }
 
 static void SecSimulateAutoArriveImpl(void) {
+    if (g_simInFlight) return;
+
+    if (!g_taskBcmxdh.length || !g_dealTaskTarget) {
+        SecCollectTaskIdsFromUI();
+    }
     if (!g_taskBcmxdh.length) {
         SecShowSimResult(@"缺少 bcmxdh，请刷新任务页");
         return;
     }
 
-    id target = SecFastDealTaskTarget();
+    id target = g_dealTaskTarget ?: SecFindServiceFromTaskPages();
     if (!target) {
         SecShowSimResult(@"无 service，请打开当前任务页");
         return;
     }
 
+    g_simInFlight = YES;
     g_simulatingAuto = YES;
     g_forceAutoCzlx = YES;
+    SecShowSimResult(@"已提交 dealTask…");
+    SecScheduleClearSimFlags();
 
-    NSInteger n = SecDirectDealTaskOn(target);
-    if (n == 0) {
-        SecClearSimFlags();
-        SecShowSimResult(@"dealTask 调用失败");
-    } else {
-        SecScheduleClearSimFlags();
-        SecShowSimResult(@"已提交 dealTask");
-    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (g_simInFlight) {
+            SecClearSimFlags();
+            SecShowSimResult(@"dealTask 超时(15s)");
+        }
+    });
+
+    __weak id weakTarget = target;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        id strongTarget = weakTarget;
+        NSInteger n = strongTarget ? SecDirectDealTaskOn(strongTarget) : 0;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            g_simInFlight = NO;
+            if (n == 0) {
+                SecClearSimFlags();
+                SecShowSimResult(@"dealTask 调用失败");
+            } else {
+                SecShowSimResult(@"dealTask 已请求");
+            }
+        });
+    });
 }
 
 static void SecSimulateAutoArrive(void) {
@@ -893,6 +928,10 @@ static void SecSimulateAutoArrive(void) {
     }
     if (!g_enabled) {
         SecShowSimResult(@"请先打开开关");
+        return;
+    }
+    if (g_simInFlight) {
+        SecShowSimResult(@"上一笔模拟仍在进行");
         return;
     }
 
@@ -905,11 +944,7 @@ static void SecSimulateAutoArrive(void) {
 
     NSDictionary *t = DisplayStation();
     SecPanelLog(@"模拟 → %@", SecStationTitle(t));
-    SecShowSimResult(@"模拟中…");
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        SecSimulateAutoArriveImpl();
-    });
+    SecSimulateAutoArriveImpl();
 }
 
 #pragma mark - dealTask 日志
