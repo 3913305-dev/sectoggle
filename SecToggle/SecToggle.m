@@ -56,6 +56,9 @@ static BOOL g_inAutoStayedChain = NO;
 static BOOL g_forceAutoCzlx = NO;
 static BOOL g_simInFlight = NO;
 static NSTimeInterval g_lastSimTime = 0;
+static NSTimeInterval g_lastSimDealTime = 0;
+static NSString *g_lastSimDealZddm = nil;
+static dispatch_block_t g_simTimeoutBlock = nil;
 static CLLocation *g_fakeLocation = nil;
 static NSTimer *g_gpsPulseTimer = nil;
 static NSInteger g_gpsPulseIndex = 0;
@@ -85,10 +88,72 @@ static void SecClearSimFlags(void) {
     g_simInFlight = NO;
 }
 
-static void SecScheduleClearSimFlags(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        SecClearSimFlags();
+static void SecCancelSimTimeout(void) {
+    if (g_simTimeoutBlock) {
+        dispatch_block_cancel(g_simTimeoutBlock);
+        g_simTimeoutBlock = NULL;
+    }
+}
+
+static void SecBeginSimWindow(void) {
+    SecCancelSimTimeout();
+    g_simulatingAuto = YES;
+    g_forceAutoCzlx = YES;
+    g_simInFlight = YES;
+    g_lastSimDealTime = 0;
+    g_lastSimDealZddm = nil;
+
+    g_simTimeoutBlock = dispatch_block_create(0, ^{
+        if (g_simInFlight) {
+            SecPanelLog(@"模拟窗口超时(30s)");
+            SecClearSimFlags();
+        }
     });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), g_simTimeoutBlock);
+}
+
+static void SecEndSimWindow(void) {
+    SecCancelSimTimeout();
+    SecClearSimFlags();
+}
+
+static BOOL SecIsSimActive(void) {
+    return g_simulatingAuto || g_forceAutoCzlx || g_inAutoStayedChain;
+}
+
+static BOOL SecShouldSkipDuplicateSimDeal(id zddm) {
+    if (!SecIsSimActive()) return NO;
+    NSString *z = [zddm description];
+    if (!z.length) return NO;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (g_lastSimDealZddm.length &&
+        [g_lastSimDealZddm isEqualToString:z] &&
+        (now - g_lastSimDealTime) < 4.0) {
+        return YES;
+    }
+    g_lastSimDealZddm = z;
+    g_lastSimDealTime = now;
+    return NO;
+}
+
+static id SecWrapSimCompletion(id completion) {
+    void (^origCb)(id, NSError *) = completion;
+    return ^(id resp, NSError *err) {
+        if (err) {
+            SecPanelLog(@"dealTask 失败 %@", err.localizedDescription);
+        } else {
+            SecPanelLog(@"dealTask 完成");
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (g_simInFlight) {
+                SecEndSimWindow();
+                SecShowSimResult(err ? [NSString stringWithFormat:@"dealTask 失败: %@", err.localizedDescription] :
+                                   @"dealTask 已完成");
+            }
+        });
+        if (origCb) origCb(resp, err);
+    };
 }
 static NSHashTable *g_stayedTargets = nil;
 static NSHashTable *g_siteTargets = nil;
@@ -284,7 +349,7 @@ static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
         }
     }
 
-    if (g_simulatingAuto || g_forceAutoCzlx) {
+    if (SecIsSimActive()) {
         NSString *autoCzlx = [SecAutoDealType() description];
         for (NSString *key in @[@"n_czlx", @"c_czlx", @"czlx"]) {
             NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9]+\"?", key];
@@ -692,15 +757,24 @@ static id SecFindAutoStayedTarget(void) {
         }
     }
 
-    __block id matched = nil;
-    __block id any = nil;
-    SecWalkWindows(^(id node) {
-        if (![node respondsToSelector:stayedSel]) return;
-        if (!any) any = node;
-        if (!matched && SecZddmMatches(node, wantZddm)) matched = node;
+    __block id found = nil;
+    SecForEachWindow(^(UIWindow *win) {
+        if (found) return;
+        for (UIViewController *vc = SecTopViewController(win.rootViewController); vc; vc = vc.parentViewController) {
+            if ([vc respondsToSelector:stayedSel] && SecZddmMatches(vc, wantZddm)) {
+                found = vc;
+                return;
+            }
+            for (NSString *key in @[@"service", @"_service"]) {
+                id svc = SecKVCTry(vc, key);
+                if (svc && [svc respondsToSelector:stayedSel] && SecZddmMatches(svc, wantZddm)) {
+                    found = svc;
+                    return;
+                }
+            }
+        }
     });
-    if (matched) return matched;
-    if (any) return any;
+    if (found) return found;
 
     Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
     SEL sharedSel = @selector(sharedGeoFence);
@@ -714,7 +788,18 @@ static id SecFindAutoStayedTarget(void) {
             return delegate;
         }
     }
-    return nil;
+
+    __block id matched = nil;
+    __block id any = nil;
+    g_walkNodeCount = 0;
+    SecWalkWindows(^(id node) {
+        if (g_walkNodeCount > 800) return;
+        if (![node respondsToSelector:stayedSel]) return;
+        if (!any) any = node;
+        if (!matched && SecZddmMatches(node, wantZddm)) matched = node;
+    });
+    if (matched) return matched;
+    return any;
 }
 
 static NSInteger SecTriggerAutoStayedOnce(void) {
@@ -743,6 +828,10 @@ static void hook_stayedFired(id self, SEL _cmd, id timer) {
 
 static void hook_tapOpeIn(id self, SEL _cmd, id sender) {
     if (g_siteTargets && SecClassMatches(self)) [g_siteTargets addObject:self];
+    if (g_simulatingAuto || g_forceAutoCzlx) {
+        SecPanelLog(@"拦截手动 tapOpeIn ← %@", [self class]);
+        return;
+    }
     orig_tapOpeIn(self, _cmd, sender);
 }
 
@@ -816,19 +905,6 @@ static NSInteger SecDirectDealTaskOn(id target) {
     NSNumber *fjsj = @((NSInteger)([[NSDate date] timeIntervalSince1970] * 1000));
     id dealType = SecAutoDealType();
 
-    void (^completion)(id, NSError *) = ^(id resp, NSError *err) {
-        if (err) {
-            SecPanelLog(@"dealTask 失败 %@", err.localizedDescription);
-        } else {
-            SecPanelLog(@"dealTask 完成");
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *tip = err ? [NSString stringWithFormat:@"dealTask 失败: %@", err.localizedDescription] :
-                @"dealTask 已请求";
-            SecShowSimResult(tip);
-        });
-    };
-
     SEL fullSel = SecDealTaskSel();
     SEL shortSel = @selector(bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
 
@@ -842,14 +918,14 @@ static NSInteger SecDirectDealTaskOn(id target) {
         if ([target respondsToSelector:fullSel]) {
             ((void (*)(id, SEL, id, id, id, id, id, id, id, id))objc_msgSend)(
                 target, fullSel,
-                bcdh ?: @"", bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, completion);
+                bcdh ?: @"", bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, nil);
             SecPanelLog(@"dealTask 已调用 zddm=%@ type=%@", zddm, dealType);
             return 1;
         }
         if ([target respondsToSelector:shortSel]) {
             ((void (*)(id, SEL, id, id, id, id, id, id, id))objc_msgSend)(
                 target, shortSel,
-                bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, completion);
+                bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, nil);
             SecPanelLog(@"dealTask(短) zddm=%@ type=%@", zddm, dealType);
             return 1;
         }
@@ -886,39 +962,29 @@ static void SecSimulateAutoArriveImpl(void) {
         return;
     }
 
-    id target = g_dealTaskTarget ?: SecFindServiceFromTaskPages();
-    if (!target) {
-        SecShowSimResult(@"无 service，请打开当前任务页");
+    SecInstallDealTaskHooks();
+    SecInstallStayedHooks();
+    SecInstallTapOpeInHooks();
+    SecBeginSimWindow();
+    SecShowSimResult(@"模拟中…");
+
+    NSInteger n = SecTriggerAutoStayedOnce();
+    if (n == 0) {
+        id target = g_dealTaskTarget ?: SecFindServiceFromTaskPages();
+        if (target) {
+            n = SecDirectDealTaskOn(target);
+        }
+    }
+
+    if (n == 0) {
+        SecEndSimWindow();
+        SecShowSimResult(@"未找到自动入口，请留任务页等围栏");
+        SecPanelLog(@"无 Stayed/service zddm=%@", DisplayStation()[@"zddm"]);
         return;
     }
 
-    g_simInFlight = YES;
-    g_simulatingAuto = YES;
-    g_forceAutoCzlx = YES;
-    SecShowSimResult(@"已提交 dealTask…");
-    SecScheduleClearSimFlags();
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (g_simInFlight) {
-            SecClearSimFlags();
-            SecShowSimResult(@"dealTask 超时(15s)");
-        }
-    });
-
-    __weak id weakTarget = target;
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        id strongTarget = weakTarget;
-        NSInteger n = strongTarget ? SecDirectDealTaskOn(strongTarget) : 0;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            g_simInFlight = NO;
-            if (n == 0) {
-                SecClearSimFlags();
-                SecShowSimResult(@"dealTask 调用失败");
-            } else {
-                SecShowSimResult(@"dealTask 已请求");
-            }
-        });
-    });
+    NSString *typeHint = g_lastDealType.length ? g_lastDealType : [SecAutoDealType() description];
+    SecShowSimResult([NSString stringWithFormat:@"已触发 czlx=%@", typeHint]);
 }
 
 static void SecSimulateAutoArrive(void) {
@@ -944,7 +1010,9 @@ static void SecSimulateAutoArrive(void) {
 
     NSDictionary *t = DisplayStation();
     SecPanelLog(@"模拟 → %@", SecStationTitle(t));
-    SecSimulateAutoArriveImpl();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SecSimulateAutoArriveImpl();
+    });
 }
 
 #pragma mark - dealTask 日志
@@ -968,10 +1036,19 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
     }
 
     id useType = dealType;
-    if (g_simulatingAuto || g_inAutoStayedChain || g_forceAutoCzlx) {
-        if (SecIsManualDealType(dealType)) {
-            useType = SecAutoDealType();
+    if (SecIsSimActive()) {
+        useType = SecAutoDealType();
+    }
+
+    if (SecShouldSkipDuplicateSimDeal(useZddm)) {
+        SecPanelLog(@"跳过重复 dealTask %@", useZddm);
+        if (completion) {
+            void (^cb)(id, NSError *) = completion;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                cb(nil, nil);
+            });
         }
+        return;
     }
 
     g_lastDealType = [useType description];
@@ -980,8 +1057,10 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
         g_cachedAutoDealType = useType;
     }
 
+    id wrappedCompletion = SecIsSimActive() ? SecWrapSimCompletion(completion) : completion;
+
     SecPanelLog(@"dealTask %@ zddm=%@ type=%@", g_lastDealClass, useZddm, useType);
-    orig_dealTask(self, _cmd, bcdh, bcmxdh, useZddm, useLat, useLon, fjsj, useType, completion);
+    orig_dealTask(self, _cmd, bcdh, bcmxdh, useZddm, useLat, useLon, fjsj, useType, wrappedCompletion);
 }
 
 static void SecInstallDealTaskHooks(void) {
