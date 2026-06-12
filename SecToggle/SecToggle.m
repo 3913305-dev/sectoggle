@@ -38,6 +38,8 @@ static id g_cachedAutoDealType = nil;
 static NSString *g_taskBcdh = nil;
 static NSString *g_taskBcmxdh = nil;
 static BOOL g_simulatingAuto = NO;
+static BOOL g_inAutoStayedChain = NO;
+static NSTimeInterval g_lastSimTime = 0;
 static NSHashTable *g_stayedTargets = nil;
 static NSHashTable *g_siteTargets = nil;
 
@@ -343,50 +345,60 @@ static void SecCollectTaskIdsFromUI(void) {
     });
 }
 
-static NSInteger SecTriggerAllSiteActions(NSInteger *foundTapOpeIn, NSInteger *foundRwczZddd) {
-    __block NSInteger count = 0;
-    __block NSInteger tapFound = 0;
-    __block NSInteger zdddFound = 0;
-
-    SecWalkWindows(^(id node) {
-        if ([node respondsToSelector:@selector(rwczZddd)]) {
-            zdddFound++;
-            count += SecInvokeSelector(node, @selector(rwczZddd));
-            if (g_siteTargets) [g_siteTargets addObject:node];
-        }
-        if ([node respondsToSelector:@selector(tapOpeIn:)]) {
-            tapFound++;
-            count += SecTapOpeInOnObject(node);
-        }
-        if ([node respondsToSelector:@selector(handleWhenStayedTimerFired:)]) {
-            count += SecInvokeSelectorWithArg(node, @selector(handleWhenStayedTimerFired:), nil);
-            if (g_stayedTargets) [g_stayedTargets addObject:node];
-        }
-        if ([node respondsToSelector:@selector(startStayedTimer)]) {
-            count += SecInvokeSelector(node, @selector(startStayedTimer));
-        }
-        if ([node respondsToSelector:@selector(amapGeoFenceRegionStatusDidChangedToStayed:)]) {
-            count += SecInvokeSelectorWithArg(node, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
-        }
-    });
-
-    if (foundTapOpeIn) *foundTapOpeIn = tapFound;
-    if (foundRwczZddd) *foundRwczZddd = zdddFound;
-    return count;
+static BOOL SecZddmMatches(id obj, NSString *wantZddm) {
+    if (!wantZddm.length) return YES;
+    NSString *z = SecStringFromKV(obj, @[@"c_zddm", @"zddm", @"_c_zddm", @"n_zddm"]);
+    if (!z.length) return YES;
+    return [z isEqualToString:wantZddm];
 }
 
-static NSInteger SecTriggerCachedTargets(void) {
-    NSInteger count = 0;
+static id SecFindAutoStayedTarget(void) {
+    NSString *wantZddm = [[DisplayStation()[@"zddm"] description] copy];
+
     for (id obj in g_stayedTargets) {
-        count += SecInvokeSelector(obj, @selector(startStayedTimer));
-        count += SecInvokeSelectorWithArg(obj, @selector(handleWhenStayedTimerFired:), nil);
-        count += SecInvokeSelectorWithArg(obj, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
+        if ([obj respondsToSelector:@selector(handleWhenStayedTimerFired:)] &&
+            SecZddmMatches(obj, wantZddm)) {
+            return obj;
+        }
     }
-    for (id obj in g_siteTargets) {
-        count += SecTapOpeInOnObject(obj);
-        count += SecInvokeSelectorWithArg(obj, @selector(handleWhenStayedTimerFired:), nil);
+
+    __block id found = nil;
+    SecWalkWindows(^(id node) {
+        if (found) return;
+        if (![node respondsToSelector:@selector(handleWhenStayedTimerFired:)]) return;
+        if (!SecZddmMatches(node, wantZddm)) return;
+        found = node;
+    });
+    if (found) return found;
+
+    Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
+    SEL sharedSel = @selector(sharedGeoFence);
+    if (mgrCls && [mgrCls respondsToSelector:sharedSel]) {
+        id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, sharedSel);
+        id delegate = nil;
+        if (mgr && [mgr respondsToSelector:@selector(delegate)]) {
+            delegate = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(delegate));
+        }
+        if (delegate && [delegate respondsToSelector:@selector(handleWhenStayedTimerFired:)]) {
+            return delegate;
+        }
     }
-    return count;
+    return nil;
+}
+
+static NSInteger SecTriggerAutoStayedOnce(void) {
+    id target = SecFindAutoStayedTarget();
+    if (!target) return 0;
+
+    g_inAutoStayedChain = YES;
+    NSInteger n = SecInvokeSelectorWithArg(target, @selector(handleWhenStayedTimerFired:), nil);
+    g_inAutoStayedChain = NO;
+
+    if (n > 0) {
+        if (g_stayedTargets) [g_stayedTargets addObject:target];
+        NSLog(@"[SecToggle] 自动到达(Stayed×1) ← %@", [target class]);
+    }
+    return n > 0 ? 1 : 0;
 }
 
 static void (*orig_stayedFired)(id, SEL, id);
@@ -489,7 +501,7 @@ static NSInteger SecDirectDealTask(void) {
     NSNumber *lat = @([t[@"wd"] doubleValue]);
     NSNumber *lon = @([t[@"jd"] doubleValue]);
     NSNumber *fjsj = @((NSInteger)([[NSDate date] timeIntervalSince1970] * 1000));
-    id dealType = g_cachedAutoDealType ?: @1;
+    id dealType = g_cachedAutoDealType ?: @2;
 
     void (^completion)(id, NSError *) = ^(id resp, NSError *err) {
         NSLog(@"[SecToggle] dealTask 回调 err=%@ resp=%@", err, resp);
@@ -550,40 +562,33 @@ static void SecSimulateAutoArrive(void) {
         return;
     }
 
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (now - g_lastSimTime < 2.0) {
+        SecShowSimResult(@"请勿连续点击(2秒内)");
+        return;
+    }
+    g_lastSimTime = now;
+
     NSDictionary *t = DisplayStation();
     NSLog(@"[SecToggle] 模拟自动到达 → %@ wd=%f jd=%f",
           SecStationTitle(t), [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]);
 
     SecInstallDealTaskHooks();
     SecInstallStayedHooks();
-    SecInstallTapOpeInHooks();
 
     g_simulatingAuto = YES;
-    SecCollectTaskIdsFromUI();
 
-    NSInteger tapFound = 0, zdddFound = 0;
-    NSInteger n = 0;
-    n += SecTriggerCachedTargets();
-    n += SecTriggerAllSiteActions(&tapFound, &zdddFound);
-    SecTriggerAMapGeoFenceStayed();
-    n += SecDirectDealTask();
+    NSInteger n = SecTriggerAutoStayedOnce();
 
     g_simulatingAuto = NO;
 
     if (n == 0) {
-        NSString *msg;
-        if (tapFound == 0 && zdddFound == 0) {
-            msg = @"页内无站点卡片，请下滑到站点行；或开关ON后手动点到达";
-        } else {
-            msg = [NSString stringWithFormat:@"发现控件但未生效(tap=%ld zddd=%ld)，请手动点到达",
-                   (long)tapFound, (long)zdddFound];
-        }
-        SecShowSimResult(msg);
-        NSLog(@"[SecToggle] 模拟失败 tap=%ld zddd=%ld bcdh=%@ bcmxdh=%@",
-              (long)tapFound, (long)zdddFound, g_taskBcdh, g_taskBcmxdh);
-    } else if (!g_lastDealType.length) {
-        SecShowSimResult([NSString stringWithFormat:@"已触发 %ld 次", (long)n]);
-        NSLog(@"[SecToggle] 模拟完成，触发 %ld 次", (long)n);
+        SecShowSimResult(@"未找到自动入口，请开关ON等待围栏或手动点到达");
+        NSLog(@"[SecToggle] 无 Stayed 目标 zddm=%@", t[@"zddm"]);
+    } else if (g_lastDealType.length) {
+        SecShowSimResult([NSString stringWithFormat:@"已触发自动 dealType=%@", g_lastDealType]);
+    } else {
+        SecShowSimResult(@"已触发自动到达(Stayed×1)");
     }
 }
 
@@ -596,9 +601,12 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
     g_dealTaskTarget = self;
     g_lastDealType = [dealType description];
     g_lastDealClass = NSStringFromClass([self class]);
-    if (g_lastDealType.length && ![g_lastDealType isEqualToString:@"0"]) {
+
+    NSString *dt = g_lastDealType;
+    if (g_inAutoStayedChain || (dt.length && ![dt isEqualToString:@"0"] && ![dt isEqualToString:@"1"])) {
         g_cachedAutoDealType = dealType;
     }
+
     NSLog(@"[SecToggle] dealTask class=%@ zddm=%@ dealType=%@ lat=%@ lon=%@",
           g_lastDealClass, zddm, dealType, lat, lon);
     orig_dealTask(self, _cmd, bcdh, bcmxdh, zddm, lat, lon, fjsj, dealType, completion);
