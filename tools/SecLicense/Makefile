@@ -4,7 +4,7 @@ INSTALL_TARGET_PROCESSES = SecLicense
 include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = SecLicense
-SecLicense_FILES = SecLicenseApp/main.m SecLicenseApp/AppDelegate.m SecLicenseApp/ViewController.m SecLicenseApp/SecDeviceID.m SecLicenseApp/SecLicenseCore.m
+SecLicense_FILES = SecLicenseApp/main.m SecLicenseApp/AppDelegate.m SecLicenseApp/IssueViewController.m SecLicenseApp/ViewController.m SecLicenseApp/SecDeviceID.m SecLicenseApp/SecLicenseCore.m
 SecLicense_FRAMEWORKS = UIKit Foundation Security
 SecLicense_CFLAGS = -fobjc-arc
 SecLicense_INSTALL_PATH = /Applications

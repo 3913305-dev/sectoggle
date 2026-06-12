@@ -16,6 +16,7 @@ clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=13.0 \
   -o "$PAYLOAD/SecLicense" \
   "$APP_DIR/main.m" \
   "$APP_DIR/AppDelegate.m" \
+  "$APP_DIR/IssueViewController.m" \
   "$APP_DIR/ViewController.m" \
   "$APP_DIR/SecDeviceID.m" \
   "$APP_DIR/SecLicenseCore.m"

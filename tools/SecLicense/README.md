@@ -14,12 +14,16 @@
 
 ## 使用流程
 
-1. **中邮司机帮 + SecToggle**（推荐）：注入 dylib 后，在 **SEC 悬浮面板** 复制 UUID → Windows 发码 → 面板内激活。
-2. **SecLicense 独立 App**（可选）：仅用于单独测试发码流程；其 UUID 与宿主 App **不通用**。
-3. **Windows**：双击 `发码工具.bat` → 粘贴 UUID → **生成激活码**。
-4. 把激活码发回用户 → 在 SecToggle 面板或 SecLicense App 输入 → **保存/激活**。
+1. **巨魔安装** `SecLicense.ipa`（Actions → **Build SecLicense.ipa** → Artifacts）。
+2. 打开 App → **「发码」** 页：
+   - 粘贴用户在中邮司机帮 **SEC 面板** 复制的 UUID
+   - 设置有效天数 → **生成激活码** → 复制发给用户
+3. 用户在 **中邮司机帮 SEC 面板** → **输入激活码** 完成授权。
+4. **「本机激活」** 页仅用于测试 SecLicense App 自身，UUID 与宿主 App 不同。
 
-## Windows 发码
+> Windows `发码工具.bat` 为可选备用，算法与 App 一致。
+
+## Windows 发码（可选）
 
 ```bat
 :: 图形界面

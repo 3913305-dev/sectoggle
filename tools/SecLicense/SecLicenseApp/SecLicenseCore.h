@@ -8,6 +8,7 @@ NSString *SecLicenseCanonicalCode(NSString *raw);
 NSString *SecLicenseExpiryFromCode(NSString *code);
 NSString *SecLicenseExpiryDisplay(NSString *yyyymmdd);
 BOOL SecLicenseIsExpired(NSString *yyyymmdd);
+NSString *SecLicenseExpiryFromDays(NSInteger days);
 NSString *SecLicenseGenerateCodeWithExpiry(NSString *uuid, NSString *secret, NSString *expiryYYYYMMDD);
 NSString *SecLicenseGenerateCode(NSString *uuid, NSString *secret);
 BOOL SecLicenseVerify(NSString *uuid, NSString *code, NSString *secret);

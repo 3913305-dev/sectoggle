@@ -18,7 +18,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
-    self.title = @"SecLicense";
+    self.title = @"本机激活";
 
     self.deviceUUID = [SecDeviceID keychainDeviceUUID];
 
@@ -47,7 +47,7 @@
 
     [stack addArrangedSubview:[self sectionTitle:@"授权状态"]];
     [stack addArrangedSubview:self.statusLabel];
-    [stack addArrangedSubview:[self sectionTitle:@"设备 UUID（发码用，复制给管理员）"]];
+    [stack addArrangedSubview:[self sectionTitle:@"本 App 的 UUID（仅测试用）"]];
     [stack addArrangedSubview:self.uuidLabel];
     [stack addArrangedSubview:[self copyButton:@"复制 UUID" action:@selector(copyUUID)]];
     [stack addArrangedSubview:[self sectionTitle:@"短码核对"]];
@@ -74,7 +74,7 @@
     [btnRow addArrangedSubview:[self actionButton:@"清除授权" action:@selector(clearLicense)]];
     [stack addArrangedSubview:btnRow];
 
-    UILabel *hint = [self makeLabel:@"抹机或删 App 后 Keychain UUID 可能变化，需重新发码。" font:[UIFont systemFontOfSize:12] color:[UIColor secondaryLabelColor]];
+    UILabel *hint = [self makeLabel:@"正式授权请在中邮司机帮 SEC 面板激活。此处仅用于测试本 App 或校验激活码。" font:[UIFont systemFontOfSize:12] color:[UIColor secondaryLabelColor]];
     hint.numberOfLines = 0;
     [stack addArrangedSubview:hint];
 

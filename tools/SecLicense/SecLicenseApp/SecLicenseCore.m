@@ -133,6 +133,16 @@ BOOL SecLicenseIsExpired(NSString *yyyymmdd) {
     return [[NSDate date] compare:end] == NSOrderedDescending;
 }
 
+NSString *SecLicenseExpiryFromDays(NSInteger days) {
+    if (days < 1) days = 1;
+    NSDate *date = [[NSDate date] dateByAddingTimeInterval:(NSTimeInterval)days * 86400.0];
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"yyyyMMdd";
+    f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    f.timeZone = [NSTimeZone localTimeZone];
+    return [f stringFromString:date];
+}
+
 NSString *SecLicenseGenerateCodeWithExpiry(NSString *uuid, NSString *secret, NSString *expiryYYYYMMDD) {
     NSString *norm = SecLicenseNormalizeUUID(uuid);
     if (!norm || !secret.length || !SecLicenseValidExpiry(expiryYYYYMMDD)) return nil;
