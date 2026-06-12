@@ -1723,19 +1723,116 @@ static BOOL SecLooksLikePlate(NSString *s) {
     return YES;
 }
 
-static NSString *SecReadPlateFromViewHierarchy(UIView *view, NSInteger depth) {
-    if (!view || depth > 12) return nil;
+static NSString *SecExtractPlateFromText(NSString *raw) {
+    if (!raw.length) return nil;
+    NSString *compact = [[raw stringByReplacingOccurrencesOfString:@" " withString:@""]
+                         stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (SecLooksLikePlate(compact)) return compact;
+
+    static NSRegularExpression *plateRe;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        plateRe = [NSRegularExpression regularExpressionWithPattern:@"[\\u4e00-\\u9fff][A-Z][A-Z0-9]{4,6}"
+                                                            options:0
+                                                              error:nil];
+    });
+    if (!plateRe) return nil;
+    __block NSString *found = nil;
+    [plateRe enumerateMatchesInString:compact
+                              options:0
+                                range:NSMakeRange(0, compact.length)
+                           usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+        if (!result) return;
+        NSString *candidate = [compact substringWithRange:result.range];
+        if (SecLooksLikePlate(candidate)) {
+            found = candidate;
+            *stop = YES;
+        }
+    }];
+    return found;
+}
+
+static NSString *SecTextFromLabelLike(id obj) {
+    if (!obj) return nil;
+    if ([obj respondsToSelector:@selector(text)]) {
+        return SecExtractPlateFromText([obj text]);
+    }
+    if ([obj isKindOfClass:[NSString class]]) {
+        return SecExtractPlateFromText((NSString *)obj);
+    }
+    return nil;
+}
+
+static NSString *SecCombinePlateParts(NSString *a, NSString *b) {
+    NSString *sa = SecNormalizePlateText(a);
+    NSString *sb = SecNormalizePlateText(b);
+    if (!sa.length && !sb.length) return nil;
+    return SecExtractPlateFromText([NSString stringWithFormat:@"%@%@", sa ?: @"", sb ?: @""]);
+}
+
+static NSString *SecReadSplitPlateFromObject(id obj) {
+    if (!obj) return nil;
+
+    NSArray *pairs = @[
+        @[@"cardLicencePlate1Lab", @"cardLicencePlate2Lab"],
+        @[@"cardLicensePlate1Lab", @"cardLicensePlate2Lab"],
+        @[@"car1Lab", @"car2Lab"],
+        @[@"labRegname", @"labRegname1"],
+        @[@"labRegName", @"labRegname1"],
+        @[@"labRegnameField", @"labRegnameField1"],
+        @[@"carInfo1Lab", @"carInfo2Lab"],
+    ];
+    for (NSArray *pair in pairs) {
+        id la = SecKVCTry(obj, pair[0]);
+        id lb = SecKVCTry(obj, pair[1]);
+        NSString *ta = [la respondsToSelector:@selector(text)] ? [la text] : nil;
+        NSString *tb = [lb respondsToSelector:@selector(text)] ? [lb text] : nil;
+        NSString *combined = SecCombinePlateParts(ta, tb);
+        if (combined.length) return combined;
+    }
+
+    NSArray *singleKeys = @[
+        @"regname", @"regname1", @"licensePlateNumLab", @"labRegname", @"labRegName",
+        @"labRegname1", @"carNoLab", @"carNolab", @"carnoLab", @"cphLabel", @"lbCph",
+        @"vehNo", @"nowVehLabel", @"vehicleContentLabel", @"vehLabel", @"tccarLab"
+    ];
+    for (NSString *k in singleKeys) {
+        id v = SecKVCTry(obj, k);
+        NSString *plate = SecTextFromLabelLike(v);
+        if (plate.length) return plate;
+        plate = SecExtractPlateFromText(SecStringFromKV(obj, @[k]));
+        if (plate.length) return plate;
+    }
+    return nil;
+}
+
+static void SecCollectPlateCandidatesFromView(UIView *view, NSMutableArray *out, NSInteger depth) {
+    if (!view || !out || depth > 18) return;
     if ([view isKindOfClass:[UILabel class]]) {
-        NSString *v = SecNormalizePlateText([(UILabel *)view text]);
-        if (SecLooksLikePlate(v)) return v;
+        NSString *plate = SecExtractPlateFromText([(UILabel *)view text]);
+        if (plate.length) [out addObject:plate];
+        NSString *raw = SecNormalizePlateText([(UILabel *)view text]);
+        if (raw.length >= 2 && raw.length <= 4) [out addObject:raw];
     }
     if ([view isKindOfClass:[UITextField class]]) {
-        NSString *v = SecNormalizePlateText([(UITextField *)view text]);
-        if (SecLooksLikePlate(v)) return v;
+        NSString *plate = SecExtractPlateFromText([(UITextField *)view text]);
+        if (plate.length) [out addObject:plate];
     }
     for (UIView *sub in view.subviews) {
-        NSString *v = SecReadPlateFromViewHierarchy(sub, depth + 1);
-        if (v.length) return v;
+        SecCollectPlateCandidatesFromView(sub, out, depth + 1);
+    }
+}
+
+static NSString *SecReadPlateFromViewHierarchy(UIView *view, NSInteger depth) {
+    if (!view) return nil;
+    NSMutableArray *candidates = [NSMutableArray array];
+    SecCollectPlateCandidatesFromView(view, candidates, depth);
+    for (NSString *plate in candidates) {
+        if (SecLooksLikePlate(plate)) return plate;
+    }
+    for (NSUInteger i = 0; i + 1 < candidates.count; i++) {
+        NSString *combined = SecCombinePlateParts(candidates[i], candidates[i + 1]);
+        if (combined.length) return combined;
     }
     return nil;
 }
@@ -1743,39 +1840,44 @@ static NSString *SecReadPlateFromViewHierarchy(UIView *view, NSInteger depth) {
 static NSString *SecReadPlateFromObject(id obj, NSInteger depth) {
     if (!obj || depth > 8) return nil;
 
+    NSString *split = SecReadSplitPlateFromObject(obj);
+    if (split.length) return split;
+
     NSArray *keys = @[
-        @"c_cph", @"cph", @"th_cph", @"ccph", @"c_wy_cph", @"c_qr_sgcph",
+        @"regname", @"regname1", @"c_cph", @"cph", @"th_cph", @"ccph", @"c_wy_cph", @"c_qr_sgcph",
         @"c_sgcph", @"c_xcph", @"sqghcph", @"qrcph", @"vehicleCode",
-        @"plateNumber", @"plate_number", @"plateIDNumber", @"c_xcph"
+        @"plateNumber", @"plate_number", @"plateIDNumber"
     ];
     for (NSString *k in keys) {
-        NSString *v = SecNormalizePlateText(SecStringFromKV(obj, @[k]));
-        if (SecLooksLikePlate(v)) return v;
+        NSString *v = SecExtractPlateFromText(SecStringFromKV(obj, @[k]));
+        if (v.length) return v;
     }
 
     NSArray *labelKeys = @[
         @"licensePlateNumLab", @"carNoLab", @"cphLabel", @"lbCph", @"carNolab",
         @"cardLicencePlate1Lab", @"cardLicencePlate2Lab",
-        @"cardLicensePlate1Lab", @"cardLicensePlate2Lab"
+        @"cardLicensePlate1Lab", @"cardLicensePlate2Lab",
+        @"labRegname", @"labRegName", @"labRegname1", @"vehNo", @"nowVehLabel", @"vehLabel"
     ];
     for (NSString *k in labelKeys) {
         id lab = SecKVCTry(obj, k);
-        if ([lab respondsToSelector:@selector(text)]) {
-            NSString *v = SecNormalizePlateText([lab text]);
-            if (SecLooksLikePlate(v)) return v;
-        }
+        NSString *v = SecTextFromLabelLike(lab);
+        if (v.length) return v;
     }
 
     if ([obj isKindOfClass:[NSDictionary class]]) {
         for (NSString *k in keys) {
             id raw = ((NSDictionary *)obj)[k];
-            NSString *v = SecNormalizePlateText([raw description]);
-            if (SecLooksLikePlate(v)) return v;
+            NSString *v = SecExtractPlateFromText([raw description]);
+            if (v.length) return v;
         }
         return nil;
     }
 
     if ([obj isKindOfClass:[UIViewController class]]) {
+        if (!((UIViewController *)obj).isViewLoaded) {
+            (void)[(UIViewController *)obj view];
+        }
         NSString *v = SecReadPlateFromViewHierarchy(((UIViewController *)obj).view, 0);
         if (v.length) return v;
         for (UIView *sub in ((UIViewController *)obj).view.subviews) {
@@ -1794,7 +1896,8 @@ static NSString *SecReadPlateFromObject(id obj, NSInteger depth) {
         @"model", @"checkModel", @"checkData", @"vehDic", @"task", @"taskModel",
         @"vehicleInfo", @"vehInfo", @"curVehicleInfo", @"carInfo", @"vehModel",
         @"dataModel", @"passModel", @"confirmModel", @"crenelModel", @"arrangeModel",
-        @"vehListModel", @"detailModel", @"historyModel", @"selectModel", @"selectVehDic"
+        @"vehListModel", @"detailModel", @"historyModel", @"selectModel", @"selectVehDic",
+        @"historyCheckModel"
     ];
     for (NSString *k in modelKeys) {
         id m = SecKVCTry(obj, k);
@@ -1802,6 +1905,15 @@ static NSString *SecReadPlateFromObject(id obj, NSInteger depth) {
         if (v.length) return v;
     }
     return nil;
+}
+
+static NSString *SecReadPlateFromWindows(void) {
+    __block NSString *found = nil;
+    SecForEachWindow(^(UIWindow *win) {
+        if (found.length) return;
+        found = SecReadPlateFromViewHierarchy(win, 0);
+    });
+    return found;
 }
 
 static NSString *SecResolvePlateForObject(id obj) {
@@ -1816,6 +1928,12 @@ static NSString *SecResolvePlateForObject(id obj) {
 
     if ([obj isKindOfClass:[UIViewController class]]) {
         UIViewController *host = (UIViewController *)obj;
+        if (host.navigationController) {
+            for (UIViewController *p in [host.navigationController.viewControllers reverseObjectEnumerator]) {
+                plate = SecReadPlateFromObject(p, 0);
+                if (plate.length) return plate;
+            }
+        }
         for (UIViewController *p in @[
             host.parentViewController, host.presentingViewController,
             host.navigationController ? host.navigationController.viewControllers.firstObject : nil
@@ -1823,15 +1941,42 @@ static NSString *SecResolvePlateForObject(id obj) {
             plate = SecReadPlateFromObject(p, 0);
             if (plate.length) return plate;
         }
-        if (host.navigationController && host.navigationController.viewControllers.count > 1) {
-            for (UIViewController *p in host.navigationController.viewControllers) {
-                if (p == host) continue;
-                plate = SecReadPlateFromObject(p, 0);
-                if (plate.length) return plate;
+    }
+
+    Class currTask = NSClassFromString(@"XPDCurrTaskVC");
+    if (currTask) {
+        __block id currVC = nil;
+        SecForEachWindow(^(UIWindow *win) {
+            if (currVC) return;
+            for (UIViewController *top = win.rootViewController; top; ) {
+                if ([top isKindOfClass:currTask]) {
+                    currVC = top;
+                    return;
+                }
+                if ([top isKindOfClass:[UINavigationController class]]) {
+                    for (UIViewController *p in [(UINavigationController *)top viewControllers]) {
+                        if ([p isKindOfClass:currTask]) {
+                            currVC = p;
+                            return;
+                        }
+                    }
+                    top = [(UINavigationController *)top visibleViewController];
+                    continue;
+                }
+                if ([top isKindOfClass:[UITabBarController class]]) {
+                    top = [(UITabBarController *)top selectedViewController];
+                    continue;
+                }
+                top = top.presentedViewController;
             }
+        });
+        if (currVC) {
+            plate = SecReadPlateFromObject(currVC, 0);
+            if (plate.length) return plate;
         }
     }
-    return nil;
+
+    return SecReadPlateFromWindows();
 }
 
 static id SecReadPlateColorFromObject(id obj) {
@@ -2080,7 +2225,11 @@ static BOOL SecTryAutoFillPlateOnObject(id obj, BOOL allowRetry) {
 
     NSString *plate = SecResolvePlateForObject(target);
     if (!plate.length) {
-        SecDebugLog(@"扫牌页未读到车牌 %@", NSStringFromClass([target class]));
+        SecDebugLog(@"扫牌页未读到车牌 %@ visible=%@",
+                    NSStringFromClass([target class]),
+                    SecReadPlateFromViewHierarchy(
+                        [target isKindOfClass:[UIViewController class]] ? ((UIViewController *)target).view : nil,
+                        0) ?: @"(nil)");
         return NO;
     }
 
