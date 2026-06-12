@@ -52,6 +52,7 @@ static BOOL SecShouldPatchRequestURL(NSString *url);
 static BOOL SecBodyLooksLikeGps(NSString *raw);
 static id SecKVCTry(id obj, NSString *key);
 static NSString *SecStringFromKV(id obj, NSArray *keys);
+static NSString *SecScanHookKey(Class cls, SEL sel);
 static void SecEnsureUI(void);
 static void SecSetPanelVisible(BOOL visible);
 static void SecUpdateLicenseUI(void);
@@ -1277,7 +1278,7 @@ static BOOL hook_canDoSignIn(id self, SEL _cmd) {
     return ((BOOL (*)(id, SEL))orig)(self, _cmd);
 }
 
-static void hook_btnSignInAction(id self, SEL _cmd) {
+static void hook_btnSignInAction(id self, SEL _cmd, id sender) {
     if (g_enabled) {
         SecBindActionStationFromObject(self);
         SecRefreshFakeLocation();
@@ -1285,7 +1286,7 @@ static void hook_btnSignInAction(id self, SEL _cmd) {
     NSValue *v = g_signinOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
     if (!v) return;
     IMP orig = [v pointerValue];
-    ((void (*)(id, SEL))orig)(self, _cmd);
+    ((void (*)(id, SEL, id))orig)(self, _cmd, sender);
 }
 
 static void SecInstallSigninHooks(void) {
