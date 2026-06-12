@@ -18,6 +18,7 @@ static void SecUpdateStationPicker(void);
 static void SecSortStations(void);
 static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
+static void SecInstallPlateHooks(void);
 static void SecPanelLog(NSString *format, ...);
 static void SecDebugLog(NSString *format, ...);
 static NSString *SecStationTitle(NSDictionary *t);
@@ -1059,6 +1060,237 @@ static void SecInstallDealTaskHooks(void) {
     free(classes);
 }
 
+#pragma mark - 扫牌自动填车牌
+
+static NSMapTable *g_plateFilledVCs = nil;
+
+static BOOL SecPlatePageClass(NSString *cn) {
+    if (!cn.length) return NO;
+    static NSSet *names;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        names = [NSSet setWithObjects:
+                 @"XPDDispatchVehCheckVC", @"XPDCarTakePhoneVC", @"XPDCarInfoVC", nil];
+    });
+    if ([names containsObject:cn]) return YES;
+    return [cn containsString:@"VehCheck"] || [cn containsString:@"CarTakePhone"];
+}
+
+static NSString *SecNormalizePlateText(NSString *raw) {
+    if (!raw.length) return nil;
+    NSString *t = [[raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
+                   stringByReplacingOccurrencesOfString:@" " withString:@""];
+    if ([t containsString:@"车牌"] || [t containsString:@"扫"] ||
+        [t isEqualToString:@"—"] || [t isEqualToString:@"--"] ||
+        [t isEqualToString:@"(null)"] || [t isEqualToString:@"<null>"]) {
+        return nil;
+    }
+    return t;
+}
+
+static BOOL SecLooksLikePlate(NSString *s) {
+    NSString *t = SecNormalizePlateText(s);
+    if (!t || t.length < 7 || t.length > 9) return NO;
+    unichar c0 = [t characterAtIndex:0];
+    if (c0 < 0x4e00 || c0 > 0x9fff) return NO;
+    unichar c1 = [t characterAtIndex:1];
+    if (c1 < 'A' || c1 > 'Z') return NO;
+    return YES;
+}
+
+static NSString *SecReadPlateFromObject(id obj, NSInteger depth) {
+    if (!obj || depth > 8) return nil;
+
+    NSArray *keys = @[
+        @"c_cph", @"cph", @"th_cph", @"ccph", @"c_wy_cph", @"c_qr_sgcph",
+        @"c_sgcph", @"c_xcph", @"sqghcph", @"qrcph", @"vehicleCode",
+        @"plateNumber", @"plate_number", @"plateIDNumber"
+    ];
+    for (NSString *k in keys) {
+        NSString *v = SecNormalizePlateText(SecStringFromKV(obj, @[k]));
+        if (SecLooksLikePlate(v)) return v;
+    }
+
+    NSArray *labelKeys = @[
+        @"licensePlateNumLab", @"carNoLab", @"cphLabel", @"lbCph", @"carNolab",
+        @"cardLicencePlate1Lab", @"cardLicensePlate1Lab"
+    ];
+    for (NSString *k in labelKeys) {
+        id lab = SecKVCTry(obj, k);
+        if ([lab respondsToSelector:@selector(text)]) {
+            NSString *v = SecNormalizePlateText([lab text]);
+            if (SecLooksLikePlate(v)) return v;
+        }
+    }
+
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        for (NSString *k in keys) {
+            id raw = ((NSDictionary *)obj)[k];
+            NSString *v = SecNormalizePlateText([raw description]);
+            if (SecLooksLikePlate(v)) return v;
+        }
+        return nil;
+    }
+
+    NSArray *modelKeys = @[
+        @"model", @"checkModel", @"checkData", @"vehDic", @"task", @"vehicleInfo",
+        @"vehInfo", @"curVehicleInfo", @"carInfo", @"vehModel", @"dataModel"
+    ];
+    for (NSString *k in modelKeys) {
+        id m = SecKVCTry(obj, k);
+        NSString *v = SecReadPlateFromObject(m, depth + 1);
+        if (v.length) return v;
+    }
+    return nil;
+}
+
+static id SecReadPlateColorFromObject(id obj) {
+    if (!obj) return nil;
+    id cpys = SecKVCTry(obj, @"cpys");
+    if (cpys && cpys != (id)kCFNull) return cpys;
+    id color = SecKVCTry(obj, @"carColor") ?: SecKVCTry(obj, @"plateColor");
+    if (color && color != (id)kCFNull) return color;
+    for (NSString *k in @[@"model", @"checkModel", @"vehDic", @"task"]) {
+        id m = SecKVCTry(obj, k);
+        id c = SecReadPlateColorFromObject(m);
+        if (c) return c;
+    }
+    return nil;
+}
+
+static void SecInvokePlateScanSuccess(id vc, NSString *plate, id color) {
+    if (!vc || !plate.length) return;
+
+    if ([vc respondsToSelector:@selector(scanSucessWithRegName:color:confidence:)]) {
+        ((void (*)(id, SEL, id, id, float))objc_msgSend)(
+            vc, @selector(scanSucessWithRegName:color:confidence:), plate, color ?: @"", 0.99f);
+        return;
+    }
+    if ([vc respondsToSelector:@selector(scanResultRegname:CPYS:)]) {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(
+            vc, @selector(scanResultRegname:CPYS:), plate, color ?: @"");
+        return;
+    }
+    if ([vc respondsToSelector:@selector(scanResultRegname:color:)]) {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(
+            vc, @selector(scanResultRegname:color:), plate, color ?: @"");
+        return;
+    }
+    if ([vc respondsToSelector:@selector(getCarScan:cpys:)]) {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(
+            vc, @selector(getCarScan:cpys:), plate, color ?: @"1");
+    }
+}
+
+static BOOL SecTryAutoFillPlateOnVC(id vc) {
+    if (!g_licensed || !vc) return NO;
+    if (!SecPlatePageClass(NSStringFromClass([vc class]))) return NO;
+
+    if (!g_plateFilledVCs) {
+        g_plateFilledVCs = [NSMapTable weakToStrongObjectsMapTable];
+    }
+    if ([g_plateFilledVCs objectForKey:vc]) return YES;
+
+    NSString *plate = SecReadPlateFromObject(vc, 0);
+    if (!plate.length) {
+        SecDebugLog(@"扫牌页未读到车牌 %@", NSStringFromClass([vc class]));
+        return NO;
+    }
+
+    id color = SecReadPlateColorFromObject(vc) ?: @"1";
+    SecInvokePlateScanSuccess(vc, plate, color);
+    [g_plateFilledVCs setObject:plate forKey:vc];
+    SecPanelLog(@"已自动填牌 %@", plate);
+    SecDebugLog(@"自动填牌 %@ color=%@ vc=%@", plate, color, NSStringFromClass([vc class]));
+    return YES;
+}
+
+static void (*orig_viewDidAppear)(id, SEL, BOOL);
+
+static void hook_viewDidAppear(id self, SEL _cmd, BOOL animated) {
+    orig_viewDidAppear(self, _cmd, animated);
+    if (!g_licensed) return;
+    if (!SecPlatePageClass(NSStringFromClass([self class]))) return;
+    __weak id weakVC = self;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.35 + attempt * 0.55) * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            SecTryAutoFillPlateOnVC(weakVC);
+        });
+    }
+}
+
+typedef void (*SecScanBtnIMP)(id, SEL, id);
+
+static NSMutableDictionary *g_scanBtnOrigIMPs = nil;
+
+static NSString *SecScanHookKey(Class cls, SEL sel) {
+    return [NSString stringWithFormat:@"%@-%@", NSStringFromClass(cls), NSStringFromSelector(sel)];
+}
+
+static void SecHookScanSelector(Class cls, SEL sel, IMP hookImp) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    IMP orig = method_getImplementation(m);
+    if (orig == hookImp) return;
+    if (!g_scanBtnOrigIMPs) g_scanBtnOrigIMPs = [NSMutableDictionary dictionary];
+    g_scanBtnOrigIMPs[SecScanHookKey(cls, sel)] = [NSValue valueWithPointer:orig];
+    method_setImplementation(m, hookImp);
+    SecDebugLog(@"Hook %@ ← %@", NSStringFromSelector(sel), NSStringFromClass(cls));
+}
+
+static void SecCallOrigScanAction(id self, SEL sel, id sender) {
+    if (!g_scanBtnOrigIMPs) return;
+    NSValue *v = g_scanBtnOrigIMPs[SecScanHookKey(object_getClass(self), sel)];
+    SecScanBtnIMP orig = v ? (SecScanBtnIMP)[v pointerValue] : NULL;
+    if (orig) orig(self, sel, sender);
+}
+
+static void hook_scanBtnAction(id self, SEL _cmd, id sender) {
+    if (SecTryAutoFillPlateOnVC(self)) return;
+    SecCallOrigScanAction(self, _cmd, sender);
+}
+
+static void hook_btnScanAction(id self, SEL _cmd, id sender) {
+    if (SecTryAutoFillPlateOnVC(self)) return;
+    SecCallOrigScanAction(self, _cmd, sender);
+}
+
+static void hook_tapScanPlate(id self, SEL _cmd, id sender) {
+    if (SecTryAutoFillPlateOnVC(self)) return;
+    SecCallOrigScanAction(self, _cmd, sender);
+}
+
+static void SecInstallPlateHooks(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+
+    Method m = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
+    if (m) {
+        orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_viewDidAppear);
+        SecDebugLog(@"Hook UIViewController viewDidAppear:");
+    }
+
+    int num = objc_getClassList(NULL, 0);
+    if (num <= 0) return;
+    Class *classes = (Class *)malloc((size_t)num * sizeof(Class));
+    if (!classes) return;
+    objc_getClassList(classes, num);
+
+    for (int i = 0; i < num; i++) {
+        Class cls = classes[i];
+        const char *name = class_getName(cls);
+        if (strncmp(name, "XPD", 3) != 0) continue;
+        SecHookScanSelector(cls, @selector(scanBtnAction:), (IMP)hook_scanBtnAction);
+        SecHookScanSelector(cls, @selector(btnScanAction:), (IMP)hook_btnScanAction);
+        SecHookScanSelector(cls, @selector(tapScanLisenceNo:), (IMP)hook_tapScanPlate);
+    }
+    free(classes);
+    installed = YES;
+    SecDebugLog(@"扫牌自动填牌 Hook 就绪");
+}
+
 #pragma mark - UI
 
 void SecUpdateStatusLabel(void) {
@@ -1643,6 +1875,7 @@ static void SecInstallHooks(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         SecInstallDealTaskHooks();
         SecInstallStayedHooks();
+        SecInstallPlateHooks();
         dispatch_async(dispatch_get_main_queue(), ^{
             SecDebugLog(@"业务 Hook 就绪");
         });
