@@ -244,8 +244,72 @@ static BOOL SecClassMatches(id obj) {
     return [cn hasPrefix:@"AMap"] || [cn containsString:@"GeoFence"];
 }
 
+static id SecResolveDealTaskTarget(void);
+static id SecKVCTry(id obj, NSString *key);
+static NSString *SecStringFromKV(id obj, NSArray *keys);
+static void SecForEachWindow(void (^block)(UIWindow *win));
+
+static SEL SecDealTaskSel(void) {
+    return @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+}
+
+static UIViewController *SecTopViewController(UIViewController *vc) {
+    if (!vc) return nil;
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        return SecTopViewController([(UINavigationController *)vc visibleViewController]);
+    }
+    if ([vc isKindOfClass:[UITabBarController class]]) {
+        return SecTopViewController([(UITabBarController *)vc selectedViewController]);
+    }
+    if (vc.presentedViewController) {
+        return SecTopViewController(vc.presentedViewController);
+    }
+    return vc;
+}
+
+static id SecServiceFromViewController(UIViewController *vc) {
+    if (!vc) return nil;
+    SEL dealSel = SecDealTaskSel();
+    NSString *cn = NSStringFromClass([vc class]);
+    if ([cn hasPrefix:@"XPD"]) {
+        for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
+            id svc = SecKVCTry(vc, key);
+            if (svc && [svc respondsToSelector:dealSel]) {
+                NSLog(@"[SecToggle] service ← %@.%@", cn, key);
+                return svc;
+            }
+        }
+        if ([vc respondsToSelector:dealSel]) {
+            NSLog(@"[SecToggle] dealTask ← %@", cn);
+            return vc;
+        }
+    }
+    return nil;
+}
+
+static id SecFindServiceFromTaskPages(void) {
+    SEL dealSel = SecDealTaskSel();
+    __block id found = nil;
+    SecForEachWindow(^(UIWindow *win) {
+        if (found) return;
+        for (UIViewController *vc = SecTopViewController(win.rootViewController); vc; vc = vc.parentViewController) {
+            id svc = SecServiceFromViewController(vc);
+            if (svc) {
+                found = svc;
+                return;
+            }
+        }
+    });
+    if (found) g_dealTaskTarget = found;
+    (void)dealSel;
+    return found;
+}
+
 static id SecResolveDealTaskTarget(void) {
     if (g_dealTaskTarget) return g_dealTaskTarget;
+
+    id svc = SecFindServiceFromTaskPages();
+    if (svc) return svc;
 
     Class cls = NSClassFromString(@"XPDService");
     if (!cls) return nil;
@@ -256,6 +320,7 @@ static id SecResolveDealTaskTarget(void) {
         if ([cls respondsToSelector:sel]) {
             id inst = ((id (*)(id, SEL))objc_msgSend)(cls, sel);
             if (inst) {
+                g_dealTaskTarget = inst;
                 NSLog(@"[SecToggle] XPDService ← +%@", name);
                 return inst;
             }
@@ -400,14 +465,29 @@ static void SecWalkWindows(void (^visit)(id)) {
     });
 }
 
+static void SecCollectTaskIdsFromObject(id obj) {
+    if (!obj) return;
+    if (!g_taskBcdh.length) {
+        g_taskBcdh = SecStringFromKV(obj, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh", @"c_bcdh"]);
+    }
+    if (!g_taskBcmxdh.length) {
+        g_taskBcmxdh = SecStringFromKV(obj, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh", @"c_bcmxdh"]);
+    }
+}
+
 static void SecCollectTaskIdsFromUI(void) {
-    SecWalkWindows(^(id node) {
-        if (!SecIsXPDObject(node)) return;
-        if (!g_taskBcdh.length) {
-            g_taskBcdh = SecStringFromKV(node, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh"]);
-        }
-        if (!g_taskBcmxdh.length) {
-            g_taskBcmxdh = SecStringFromKV(node, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh"]);
+    if (g_dealTaskTarget) {
+        SecCollectTaskIdsFromObject(g_dealTaskTarget);
+    }
+    SecForEachWindow(^(UIWindow *win) {
+        if (g_taskBcdh.length && g_taskBcmxdh.length && g_dealTaskTarget) return;
+        for (UIViewController *vc = SecTopViewController(win.rootViewController); vc; vc = vc.parentViewController) {
+            SecCollectTaskIdsFromObject(vc);
+            if (!g_dealTaskTarget) {
+                id svc = SecServiceFromViewController(vc);
+                if (svc) g_dealTaskTarget = svc;
+            }
+            if (g_taskBcdh.length && g_taskBcmxdh.length && g_dealTaskTarget) break;
         }
     });
 }
@@ -421,20 +501,30 @@ static BOOL SecZddmMatches(id obj, NSString *wantZddm) {
 
 static id SecFindAutoStayedTarget(void) {
     NSString *wantZddm = [[DisplayStation()[@"zddm"] description] copy];
+    SEL stayedSel = @selector(handleWhenStayedTimerFired:);
 
     for (id obj in g_stayedTargets) {
-        if ([obj respondsToSelector:@selector(handleWhenStayedTimerFired:)] &&
-            SecZddmMatches(obj, wantZddm)) {
+        if ([obj respondsToSelector:stayedSel] && SecZddmMatches(obj, wantZddm)) {
             return obj;
         }
     }
 
     __block id found = nil;
-    SecWalkWindows(^(id node) {
+    SecForEachWindow(^(UIWindow *win) {
         if (found) return;
-        if (![node respondsToSelector:@selector(handleWhenStayedTimerFired:)]) return;
-        if (!SecZddmMatches(node, wantZddm)) return;
-        found = node;
+        for (UIViewController *vc = SecTopViewController(win.rootViewController); vc; vc = vc.parentViewController) {
+            if ([vc respondsToSelector:stayedSel] && SecZddmMatches(vc, wantZddm)) {
+                found = vc;
+                return;
+            }
+            for (NSString *key in @[@"service", @"_service"]) {
+                id svc = SecKVCTry(vc, key);
+                if (svc && [svc respondsToSelector:stayedSel] && SecZddmMatches(svc, wantZddm)) {
+                    found = svc;
+                    return;
+                }
+            }
+        }
     });
     if (found) return found;
 
@@ -555,12 +645,19 @@ static void SecTriggerAMapGeoFenceStayed(void) {
 
 static NSInteger SecDirectDealTask(void) {
     id target = SecResolveDealTaskTarget();
-    if (!target) return 0;
+    if (!target) {
+        NSLog(@"[SecToggle] 无 dealTask 目标");
+        return 0;
+    }
 
     NSDictionary *t = DisplayStation();
     if (!t) return 0;
 
     SecCollectTaskIdsFromUI();
+    if (!g_taskBcmxdh.length) {
+        NSLog(@"[SecToggle] 缺少 bcmxdh");
+        return 0;
+    }
 
     NSString *bcdh = g_taskBcdh;
     NSString *bcmxdh = g_taskBcmxdh;
@@ -654,8 +751,16 @@ static void SecSimulateAutoArrive(void) {
 
     if (n == 0) {
         SecClearSimFlags();
-        SecShowSimResult(@"未找到自动入口，请开关ON等待围栏或手动点到达");
-        NSLog(@"[SecToggle] 无 Stayed 目标 zddm=%@", t[@"zddm"]);
+        id target = SecResolveDealTaskTarget();
+        if (!target) {
+            SecShowSimResult(@"无 service，请打开当前任务页");
+        } else if (!g_taskBcmxdh.length) {
+            SecShowSimResult(@"缺少 bcmxdh，请刷新任务页");
+        } else {
+            SecShowSimResult(@"未找到 Stayed，请开关ON留任务页等围栏");
+        }
+        NSLog(@"[SecToggle] 模拟失败 service=%@ bcmxdh=%@ zddm=%@",
+              target ? [target class] : nil, g_taskBcmxdh, t[@"zddm"]);
     } else {
         SecScheduleClearSimFlags();
         if (g_lastDealType.length) {
@@ -840,6 +945,11 @@ static void SecCreatePanel(void) {
     g_enabled = sender.isOn;
     NSLog(@"[SecToggle] 开关 %@", g_enabled ? @"ON" : @"OFF");
     SecUpdateStatusLabel();
+    if (g_enabled) {
+        SecCollectTaskIdsFromUI();
+        if (g_dealTaskTarget) NSLog(@"[SecToggle] 已缓存 service");
+        if (g_taskBcmxdh.length) NSLog(@"[SecToggle] bcmxdh %@", g_taskBcmxdh);
+    }
 }
 
 - (void)onNext:(id)sender {
