@@ -16,6 +16,7 @@ static void SecInstallStayedHooks(void);
 static void SecInstallTapOpeInHooks(void);
 static void SecShowSimResult(NSString *msg);
 static void SecPanelLog(NSString *format, ...);
+static void SecSimulateAutoArriveImpl(void);
 static NSString *SecStationTitle(NSDictionary *t);
 static NSString *SecShortURL(NSString *url);
 static SEL SecDealTaskSel(void);
@@ -137,7 +138,9 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
             NSMutableDictionary *entry = [@{@"key":key, @"zddm":zddm, @"name":name,
                                             @"jd":@(lon), @"wd":@(lat), @"queue":@(queue)} mutableCopy];
             [g_stations addObject:entry];
-            SecPanelLog(@"解析站点 %@", SecStationTitle(entry));
+            if (g_stations.count <= 12) {
+                SecPanelLog(@"解析站点 %@", SecStationTitle(entry));
+            }
             [g_stations sortUsingComparator:^NSComparisonResult(id a, id b) {
                 NSInteger qa = [a[@"queue"] integerValue];
                 NSInteger qb = [b[@"queue"] integerValue];
@@ -378,7 +381,7 @@ static NSInteger SecInvokeSelectorWithArg(id obj, SEL sel, id arg) {
             ((void (*)(id, SEL, id))objc_msgSend)(obj, sel, arg ?: nil);
         }
 #pragma clang diagnostic pop
-        SecPanelLog(@"已触发 %@ ← %@", NSStringFromSelector(sel), [obj class]);
+        SecPanelLog(@"已触发 %@", NSStringFromSelector(sel));
         if (g_siteTargets && SecClassMatches(obj)) {
             [g_siteTargets addObject:obj];
         }
@@ -427,7 +430,6 @@ static void SecWalkCollect(id node, void (^visit)(id), NSMutableSet *seen) {
             SecWalkCollect(sub, visit, seen);
         }
     }
-    SecWalkCollect([node nextResponder], visit, seen);
 }
 
 static void SecWalkViewControllerTree(id node, void (^visit)(id), NSMutableSet *seen) {
@@ -471,61 +473,33 @@ static id SecResolveDealTaskTarget(void) {
     if (g_dealTaskTarget) return g_dealTaskTarget;
 
     SEL dealSel = SecDealTaskSel();
+    Class svcCls = NSClassFromString(@"XPDService");
+    id singleton = SecSingletonFromClass(svcCls);
+    if (singleton && [singleton respondsToSelector:dealSel]) {
+        g_dealTaskTarget = singleton;
+        SecPanelLog(@"dealTask ← XPDService 单例");
+        return singleton;
+    }
 
     __block id found = nil;
     SecWalkWindows(^(id node) {
         if (found) return;
         if ([node respondsToSelector:dealSel]) {
             found = node;
-            SecPanelLog(@"dealTask 目标(界面) ← %@", [node class]);
+            return;
         }
-    });
-    if (found) return found;
-
-    SecWalkWindows(^(id node) {
-        if (found) return;
         for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
             id svc = SecKVCTry(node, key);
             if (svc && [svc respondsToSelector:dealSel]) {
                 found = svc;
-                SecPanelLog(@"dealTask 目标(%@) ← %@", key, [svc class]);
                 return;
             }
         }
     });
-    if (found) return found;
-
-    Class svcCls = NSClassFromString(@"XPDService");
-    id singleton = SecSingletonFromClass(svcCls);
-    if (singleton && [singleton respondsToSelector:dealSel]) return singleton;
-
-    int num = objc_getClassList(NULL, 0);
-    if (num <= 0) return nil;
-    Class *classes = (Class *)malloc((size_t)num * sizeof(Class));
-    if (!classes) return nil;
-    objc_getClassList(classes, num);
-
-    for (int i = 0; i < num; i++) {
-        const char *cn = class_getName(classes[i]);
-        if (strncmp(cn, "XPD", 3) != 0 && strncmp(cn, "AF", 2) != 0) continue;
-        if (!class_getInstanceMethod(classes[i], dealSel)) continue;
-        if (strcmp(cn, "XPDService") == 0) {
-            id inst = SecSingletonFromClass(classes[i]);
-            if (inst) {
-                free(classes);
-                return inst;
-            }
-        }
-        SecWalkWindows(^(id node) {
-            if (found) return;
-            if ([node isKindOfClass:classes[i]] && [node respondsToSelector:dealSel]) {
-                found = node;
-                SecPanelLog(@"dealTask 目标(类扫描) ← %@", NSStringFromClass(classes[i]));
-            }
-        });
-        if (found) break;
+    if (found) {
+        g_dealTaskTarget = found;
+        SecPanelLog(@"dealTask ← %@", [found class]);
     }
-    free(classes);
     return found;
 }
 
@@ -571,25 +545,7 @@ static id SecFindAutoStayedTarget(void) {
         if (!matched && SecZddmMatches(node, wantZddm)) matched = node;
     });
     if (matched) return matched;
-    if (any) {
-        SecPanelLog(@"Stayed 目标(忽略zddm) ← %@", [any class]);
-        return any;
-    }
-
-    NSArray *hintClasses = @[@"XPDSiteV", @"XPDNewSiteV", @"XPDEdnSiteInfoV", @"XPDCurrTaskVC"];
-    for (NSString *name in hintClasses) {
-        Class cls = NSClassFromString(name);
-        if (!cls) continue;
-        __block id hint = nil;
-        SecWalkWindows(^(id node) {
-            if (hint) return;
-            if ([node isKindOfClass:cls] && [node respondsToSelector:stayedSel]) hint = node;
-        });
-        if (hint) {
-            SecPanelLog(@"Stayed 目标(%@) ← %@", name, [hint class]);
-            return hint;
-        }
-    }
+    if (any) return any;
 
     Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
     SEL sharedSel = @selector(sharedGeoFence);
@@ -600,7 +556,6 @@ static id SecFindAutoStayedTarget(void) {
             delegate = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(delegate));
         }
         if (delegate && [delegate respondsToSelector:stayedSel]) {
-            SecPanelLog(@"Stayed 目标(AMap delegate) ← %@", [delegate class]);
             return delegate;
         }
     }
@@ -683,29 +638,12 @@ static void SecInstallStayedHooks(void) {
 }
 
 static NSInteger SecTriggerAMapGeoFenceStayed(void) {
-    Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
-    if (!mgrCls) return 0;
-
-    SEL sharedSel = @selector(sharedGeoFence);
-    if (![mgrCls respondsToSelector:sharedSel]) return 0;
-
-    id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, sharedSel);
-    if (!mgr) return 0;
-
-    NSInteger n = 0;
-    n += SecInvokeSelectorWithArg(mgr, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
-
-    id delegate = nil;
-    if ([mgr respondsToSelector:@selector(delegate)]) {
-        delegate = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(delegate));
-    }
-    if (delegate) {
-        if (g_stayedTargets) [g_stayedTargets addObject:delegate];
-        n += SecInvokeSelector(delegate, @selector(startStayedTimer));
-        n += SecInvokeSelectorWithArg(delegate, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
-        n += SecInvokeSelectorWithArg(delegate, @selector(handleWhenStayedTimerFired:), nil);
-    }
-    if (n > 0) SecPanelLog(@"AMap Stayed 链触发 n=%ld", (long)n);
+    id target = SecFindAutoStayedTarget();
+    if (!target) return 0;
+    g_inAutoStayedChain = YES;
+    NSInteger n = SecInvokeSelectorWithArg(target, @selector(handleWhenStayedTimerFired:), nil);
+    g_inAutoStayedChain = NO;
+    if (n > 0) SecPanelLog(@"Stayed ← %@", [target class]);
     return n > 0 ? 1 : 0;
 }
 
@@ -784,29 +722,9 @@ static void SecShowSimResult(NSString *msg) {
                           title, msg];
 }
 
-static void SecSimulateAutoArrive(void) {
-    if (!g_stations.count) {
-        SecShowSimResult(@"请先打开任务详情");
-        return;
-    }
-    if (!g_enabled) {
-        SecShowSimResult(@"请先打开开关");
-        return;
-    }
-
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    if (now - g_lastSimTime < 2.0) {
-        SecShowSimResult(@"请勿连续点击(2秒内)");
-        return;
-    }
-    g_lastSimTime = now;
-
-    NSDictionary *t = DisplayStation();
-    SecPanelLog(@"模拟 → %@", SecStationTitle(t));
-
+static void SecSimulateAutoArriveImpl(void) {
     SecInstallDealTaskHooks();
     SecInstallStayedHooks();
-    SecInstallTapOpeInHooks();
     SecCollectTaskIdsFromUI();
 
     id dealTarget = SecResolveDealTaskTarget();
@@ -835,6 +753,32 @@ static void SecSimulateAutoArrive(void) {
             SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", SecAutoDealType()]);
         }
     }
+}
+
+static void SecSimulateAutoArrive(void) {
+    if (!g_stations.count) {
+        SecShowSimResult(@"请先打开任务详情");
+        return;
+    }
+    if (!g_enabled) {
+        SecShowSimResult(@"请先打开开关");
+        return;
+    }
+
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (now - g_lastSimTime < 2.0) {
+        SecShowSimResult(@"请勿连续点击(2秒内)");
+        return;
+    }
+    g_lastSimTime = now;
+
+    NSDictionary *t = DisplayStation();
+    SecPanelLog(@"模拟 → %@", SecStationTitle(t));
+    SecShowSimResult(@"模拟中…");
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SecSimulateAutoArriveImpl();
+    });
 }
 
 #pragma mark - dealTask 日志
@@ -1032,6 +976,12 @@ static void SecCreatePanel(void) {
     g_enabled = sender.isOn;
     SecPanelLog(@"开关 %@", g_enabled ? @"ON" : @"OFF");
     SecUpdateStatusLabel();
+    if (g_enabled && g_stations.count) {
+        NSDictionary *t = DisplayStation();
+        if (t) {
+            SecPanelLog(@"GPS→%@", SecStationTitle(t));
+        }
+    }
 }
 
 - (void)onNext:(id)sender {
@@ -1056,6 +1006,8 @@ static void SecCreatePanel(void) {
 #pragma mark - Hooks
 
 static CLLocationCoordinate2D (*orig_coord)(id, SEL);
+static double (*orig_latitude)(id, SEL);
+static double (*orig_longitude)(id, SEL);
 
 static CLLocationCoordinate2D hook_coord(id self, SEL _cmd) {
     NSDictionary *t = SpoofTarget();
@@ -1066,6 +1018,18 @@ static CLLocationCoordinate2D hook_coord(id self, SEL _cmd) {
         return c;
     }
     return orig_coord(self, _cmd);
+}
+
+static double hook_latitude(id self, SEL _cmd) {
+    NSDictionary *t = SpoofTarget();
+    if (t) return [t[@"wd"] doubleValue];
+    return orig_latitude(self, _cmd);
+}
+
+static double hook_longitude(id self, SEL _cmd) {
+    NSDictionary *t = SpoofTarget();
+    if (t) return [t[@"jd"] doubleValue];
+    return orig_longitude(self, _cmd);
 }
 
 static void (*orig_setBody)(id, SEL, NSData *);
@@ -1108,6 +1072,18 @@ static void SecInstallHooks(void) {
     if (m1) {
         orig_coord = (CLLocationCoordinate2D (*)(id, SEL))method_getImplementation(m1);
         method_setImplementation(m1, (IMP)(void *)hook_coord);
+    }
+
+    Method mLat = class_getInstanceMethod([CLLocation class], @selector(latitude));
+    if (mLat) {
+        orig_latitude = (double (*)(id, SEL))method_getImplementation(mLat);
+        method_setImplementation(mLat, (IMP)hook_latitude);
+    }
+
+    Method mLon = class_getInstanceMethod([CLLocation class], @selector(longitude));
+    if (mLon) {
+        orig_longitude = (double (*)(id, SEL))method_getImplementation(mLon);
+        method_setImplementation(mLon, (IMP)hook_longitude);
     }
 
     Method m2 = class_getInstanceMethod([NSMutableURLRequest class], @selector(setHTTPBody:));
