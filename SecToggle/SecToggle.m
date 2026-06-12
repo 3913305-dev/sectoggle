@@ -15,6 +15,7 @@ static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
 static void SecInstallTapOpeInHooks(void);
 static void SecShowSimResult(NSString *msg);
+static NSDictionary *CurrentTarget(void);
 
 @interface SecToggleHandler : NSObject
 + (instancetype)shared;
