@@ -53,17 +53,25 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
     double lon = ParseDouble(jd);
     double lat = ParseDouble(wd);
     NSString *zddm = [dict[@"c_zddm"] ?: dict[@"zddm"] ?: @"" description];
-    NSString *name = [dict[@"c_zdmc"] ?: dict[@"c_zdjmc"] ?: @"" description];
+    id nameRaw = dict[@"c_zdmc"] ?: dict[@"c_zdjmc"] ?: dict[@"c_zdwz"] ?: dict[@"name"];
+    NSString *name = [nameRaw description];
+    if ([name isEqualToString:@"(null)"] || [name isEqualToString:@"<null>"]) name = @"";
 
     if (!isnan(lon) && !isnan(lat) && (lon != 0 || lat != 0)) {
         NSString *key = [NSString stringWithFormat:@"%@@%f,%f", zddm, lon, lat];
         BOOL exists = NO;
-        for (NSDictionary *s in g_stations) {
-            if ([s[@"key"] isEqualToString:key]) { exists = YES; break; }
+        for (NSMutableDictionary *s in g_stations) {
+            if ([s[@"key"] isEqualToString:key]) {
+                exists = YES;
+                if (name.length && ![s[@"name"] length]) {
+                    s[@"name"] = name;
+                }
+                break;
+            }
         }
         if (!exists) {
-            [g_stations addObject:@{@"key":key, @"zddm":zddm, @"name":name,
-                                    @"jd":@(lon), @"wd":@(lat)}];
+            [g_stations addObject:[@{@"key":key, @"zddm":zddm, @"name":name,
+                                     @"jd":@(lon), @"wd":@(lat)} mutableCopy]];
             NSLog(@"[SecToggle] 站点 %@ %@ wd=%f jd=%f", zddm, name, lat, lon);
             dispatch_async(dispatch_get_main_queue(), ^{
                 SecUpdateStatusLabel();
@@ -71,6 +79,20 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
         }
     }
     for (id k in dict) ExtractStationsFromObject(dict[k], depth + 1);
+}
+
+static NSDictionary *DisplayStation(void) {
+    if (g_stations.count == 0) return nil;
+    return g_stations[g_stationIndex % g_stations.count];
+}
+
+static NSString *SecStationTitle(NSDictionary *t) {
+    if (!t) return @"未知站点";
+    NSString *name = [t[@"name"] description];
+    if (name.length && ![name isEqualToString:@"(null)"]) return name;
+    NSString *zddm = [t[@"zddm"] description];
+    if (zddm.length && ![zddm isEqualToString:@"(null)"]) return zddm;
+    return @"未命名站点";
 }
 
 static NSDictionary *CurrentTarget(void) {
@@ -253,17 +275,20 @@ static void SecInstallDealTaskHooks(void) {
 
 void SecUpdateStatusLabel(void) {
     if (!g_statusLabel) return;
-    NSDictionary *t = g_stations.count ? g_stations[g_stationIndex % g_stations.count] : nil;
+    NSDictionary *t = DisplayStation();
     if (!t) {
         g_statusLabel.text = @"站点: 请先打开任务详情";
         return;
     }
+    NSString *title = SecStationTitle(t);
+    NSString *zddm = [t[@"zddm"] description];
     NSString *dealHint = g_lastDealType.length ?
-        [NSString stringWithFormat:@" dealType=%@", g_lastDealType] : @"";
-    g_statusLabel.text = [NSString stringWithFormat:@"[%@] %ld/%lu %@%@\nwd=%.6f jd=%.6f",
+        [NSString stringWithFormat:@" | dealType=%@", g_lastDealType] : @"";
+    g_statusLabel.text = [NSString stringWithFormat:@"[%@] %ld/%lu %@%@\n%@\nwd=%.6f  jd=%.6f",
                           g_enabled ? @"ON" : @"OFF",
                           (long)(g_stationIndex + 1), (unsigned long)g_stations.count,
-                          t[@"zddm"], dealHint,
+                          title, dealHint,
+                          zddm.length ? [NSString stringWithFormat:@"代码: %@", zddm] : @"",
                           [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]];
 }
 
@@ -280,7 +305,7 @@ static void SecCreatePanel(void) {
         return;
     }
 
-    CGFloat pw = 280, ph = 148;
+    CGFloat pw = 280, ph = 158;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(20, 120, pw, ph)];
     g_panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
     g_panel.layer.cornerRadius = 10;
@@ -296,7 +321,7 @@ static void SecCreatePanel(void) {
     [sw addTarget:[SecToggleHandler shared] action:@selector(onToggle:) forControlEvents:UIControlEventValueChanged];
     [g_panel addSubview:sw];
 
-    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 30, pw - 16, 42)];
+    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 28, pw - 16, 54)];
     g_statusLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
     g_statusLabel.font = [UIFont systemFontOfSize:11];
     g_statusLabel.numberOfLines = 0;
@@ -304,7 +329,7 @@ static void SecCreatePanel(void) {
     [g_panel addSubview:g_statusLabel];
 
     UIButton *btnNext = [UIButton buttonWithType:UIButtonTypeSystem];
-    btnNext.frame = CGRectMake(8, 88, 120, 34);
+    btnNext.frame = CGRectMake(8, 96, 120, 34);
     [btnNext setTitle:@"下一站" forState:UIControlStateNormal];
     [btnNext setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     btnNext.backgroundColor = [UIColor colorWithRed:0.2 green:0.45 blue:0.85 alpha:1];
@@ -313,7 +338,7 @@ static void SecCreatePanel(void) {
     [g_panel addSubview:btnNext];
 
     UIButton *btnAuto = [UIButton buttonWithType:UIButtonTypeSystem];
-    btnAuto.frame = CGRectMake(136, 88, 136, 34);
+    btnAuto.frame = CGRectMake(136, 96, 136, 34);
     [btnAuto setTitle:@"模拟自动到达" forState:UIControlStateNormal];
     [btnAuto setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     btnAuto.backgroundColor = [UIColor colorWithRed:0.72 green:0.38 blue:0.05 alpha:1];
