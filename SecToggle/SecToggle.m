@@ -19,6 +19,7 @@ static void SecSortStations(void);
 static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
 static void SecPanelLog(NSString *format, ...);
+static void SecDebugLog(NSString *format, ...);
 static NSString *SecStationTitle(NSDictionary *t);
 static NSString *SecStationListTitle(NSDictionary *t);
 static UIViewController *SecPresenterVC(void);
@@ -221,7 +222,7 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
             }
             [g_stations addObject:entry];
             if (g_stations.count <= 12) {
-                SecPanelLog(@"解析站点 %@", SecStationTitle(entry));
+                SecDebugLog(@"解析站点 %@", SecStationTitle(entry));
             }
             changed = YES;
         }
@@ -580,7 +581,7 @@ static void SecApplyDriveMode(BOOL syncPickerToRoute) {
         if (g_routeLegStationIdx) [g_routeLegStationIdx removeAllObjects];
         g_routeIndex = 0;
         NSDictionary *t = DisplayStation();
-        if (t) SecPanelLog(@"手动 %@", SecStationTitle(t));
+        if (t) SecPanelLog(@"手动定位：%@", SecStationTitle(t));
     }
     SecRefreshFakeLocation();
 }
@@ -702,7 +703,7 @@ static void SecApplyGpsPatchToJson(NSString **inOutRaw, double wd, double jd, NS
     if (isArrive && zddm.length) {
         out = SecPatchStringField(out, @"c_zddm", zddm);
         out = SecPatchStringField(out, @"zddm", zddm);
-        SecPanelLog(@"到达改包 %@", SecStationTitle(t));
+        SecDebugLog(@"到达改包 %@", SecStationTitle(t));
     }
 
     *inOutRaw = out;
@@ -724,6 +725,15 @@ static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
 
 static NSString *PatchJson(NSString *raw) {
     return PatchJsonForRequest(raw, @"");
+}
+
+static void SecDebugLog(NSString *format, ...) {
+    if (!format) return;
+    va_list args;
+    va_start(args, format);
+    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSLog(@"[SecToggle] %@", msg);
 }
 
 static void SecPanelLog(NSString *format, ...) {
@@ -779,7 +789,7 @@ static void SecSelectStationAtIndex(NSInteger idx) {
             g_routeDestIndex = -1;
             g_routeActive = NO;
             g_routeFinished = NO;
-            SecPanelLog(@"手动 %@", SecStationTitle(g_stations[idx]));
+            SecPanelLog(@"手动定位：%@", SecStationTitle(g_stations[idx]));
             SecRefreshFakeLocation();
         }
     }
@@ -830,32 +840,9 @@ static void SecGpsPulseTick(NSTimer *timer) {
                 SecUpdateStationPicker();
                 if (!g_routeActive) SecPanelLog(@"全自动：全部完成");
             }
-        } else if (g_routeIndex != prev) {
-            NSDictionary *dest = RouteDestStation();
-            NSArray *cur = g_routePoints[g_routeIndex];
-            double remain = 0;
-            for (NSUInteger i = g_routeIndex + 1; i < g_routePoints.count; i++) {
-                remain += SecHaversineM([cur[0] doubleValue], [cur[1] doubleValue],
-                                        [g_routePoints[i][0] doubleValue], [g_routePoints[i][1] doubleValue]);
-                cur = g_routePoints[i];
-            }
-            SecPanelLog(@"行驶→%@ 剩%.1fkm", SecStationTitle(dest), remain / 1000.0);
         }
         return;
     }
-
-    NSDictionary *t = DisplayStation();
-    if (!t) return;
-    double lat, lon;
-    SecSpoofedCoords(t, &lat, &lon, YES);
-    double baseLat = [t[@"wd"] doubleValue];
-    double baseLon = [t[@"jd"] doubleValue];
-    double cosLat = cos(baseLat * M_PI / 180.0);
-    if (fabs(cosLat) < 0.01) cosLat = 0.01;
-    double dLatM = (lat - baseLat) * 111320.0;
-    double dLonM = (lon - baseLon) * 111320.0 * cosLat;
-    double distM = sqrt(dLatM * dLatM + dLonM * dLonM);
-    SecPanelLog(@"GPS漂移 %@ ~%.0fm", SecStationTitle(t), distM);
 }
 
 static void SecStartGpsPulse(void) {
@@ -987,7 +974,7 @@ static void SecInstallStayedHooks(void) {
         if (!m) continue;
         orig_stayedFired = (void (*)(id, SEL, id))method_getImplementation(m);
         method_setImplementation(m, (IMP)hook_stayedFired);
-        SecPanelLog(@"Hook handleWhenStayedTimerFired ← %@", NSStringFromClass(classes[i]));
+        SecDebugLog(@"Hook handleWhenStayedTimerFired ← %@", NSStringFromClass(classes[i]));
         installed = YES;
         break;
     }
@@ -1026,7 +1013,7 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
         g_cachedAutoDealType = useType;
     }
 
-    SecPanelLog(@"dealTask %@ zddm=%@ type=%@", g_lastDealClass, useZddm, useType);
+    SecDebugLog(@"dealTask %@ zddm=%@ type=%@", g_lastDealClass, useZddm, useType);
     orig_dealTask(self, _cmd, bcdh, bcmxdh, useZddm, useLat, useLon, fjsj, useType, completion);
 }
 
@@ -1066,7 +1053,7 @@ static void SecInstallDealTaskHooks(void) {
         Method m = class_getInstanceMethod(hookCls, sel);
         orig_dealTask = (void (*)(id, SEL, id, id, id, id, id, id, id, id))method_getImplementation(m);
         method_setImplementation(m, (IMP)hook_dealTask);
-        SecPanelLog(@"Hook dealTask ← %@", NSStringFromClass(hookCls));
+        SecDebugLog(@"Hook dealTask ← %@", NSStringFromClass(hookCls));
         installed = YES;
     }
     free(classes);
@@ -1361,7 +1348,7 @@ static void SecEnsureUI(void) {
     SecSetIconVisible(g_iconVisible);
     if (!g_deviceUUID.length) g_deviceUUID = [SecDeviceID keychainDeviceUUID];
     SecUpdateLicenseUI();
-    SecPanelLog(g_licensed ? @"悬浮窗已显示（路线行驶）" : @"未授权，请复制 UUID 发码");
+    SecPanelLog(g_licensed ? @"SEC 已就绪" : @"未授权，请复制 UUID 发码");
 }
 
 @implementation SecToggleHandler {
@@ -1386,21 +1373,17 @@ static void SecEnsureUI(void) {
         return;
     }
     g_enabled = sender.isOn;
-    SecPanelLog(@"开关 %@ [%@]", g_enabled ? @"ON" : @"OFF", g_autoMode ? @"全自动" : @"手动");
+    SecPanelLog(g_enabled
+                ? (g_autoMode ? @"已开启 · 全自动" : @"已开启 · 手动")
+                : @"已关闭");
     SecUpdateStatusLabel();
     SecUpdateStationPicker();
     if (g_enabled && g_stations.count) {
         SecApplyDriveMode(YES);
         SecUpdateStationPicker();
-        NSDictionary *t = DisplayStation();
-        if (t && !g_autoMode) {
-            SecPanelLog(@"GPS→%@", SecStationTitle(t));
-        }
         SecStartGpsPulse();
         if (!g_taskBcmxdh.length || !g_dealTaskTarget) {
             SecCollectTaskIdsFromUI();
-            if (g_taskBcmxdh.length) SecPanelLog(@"bcmxdh %@", g_taskBcmxdh);
-            if (g_dealTaskTarget) SecPanelLog(@"已缓存 service");
         }
     } else {
         SecStopGpsPulse();
@@ -1411,7 +1394,7 @@ static void SecEnsureUI(void) {
 
 - (void)onModeChange:(UISegmentedControl *)sender {
     g_autoMode = sender.selectedSegmentIndex == 1;
-    SecPanelLog(@"模式 → %@", g_autoMode ? @"全自动" : @"手动");
+    SecPanelLog(@"模式：%@", g_autoMode ? @"全自动" : @"手动");
     SecUpdateStatusLabel();
     if (g_enabled && g_stations.count) SecApplyDriveMode(YES);
     SecUpdateStationPicker();
@@ -1419,7 +1402,7 @@ static void SecEnsureUI(void) {
 
 - (void)onPickStation:(id)sender {
     if (!g_licensed) {
-        SecPanelLog(@"未授权，请先激活");
+        SecDebugLog(@"未授权，请先激活");
         return;
     }
     if (g_stations.count == 0) {
@@ -1438,7 +1421,7 @@ static void SecEnsureUI(void) {
                                                            style:UIAlertActionStyleDefault
                                                          handler:^(UIAlertAction *a) {
             SecSelectStationAtIndex((NSInteger)idx);
-            SecPanelLog(@"切换 → %@", SecStationTitle(s));
+            SecPanelLog(@"已选：%@", SecStationTitle(s));
         }];
         [ac addAction:action];
     }
@@ -1446,7 +1429,7 @@ static void SecEnsureUI(void) {
 
     UIViewController *vc = SecPresenterVC();
     if (!vc) {
-        SecPanelLog(@"无法弹出站点列表");
+        SecDebugLog(@"无法弹出站点列表");
         return;
     }
     UIPopoverPresentationController *pop = ac.popoverPresentationController;
@@ -1461,7 +1444,7 @@ static void SecEnsureUI(void) {
     g_licensed = [SecDeviceID isLicensed];
     SecUpdateLicenseUI();
     SecSetPanelVisible(!g_panelVisible);
-    SecPanelLog(g_panelVisible ? @"面板已显示" : @"面板已隐藏");
+    SecDebugLog(g_panelVisible ? @"面板已显示" : @"面板已隐藏");
 }
 
 - (void)onIconPan:(UIPanGestureRecognizer *)g {
@@ -1477,18 +1460,18 @@ static void SecEnsureUI(void) {
 - (void)onThreeFingerTap:(UITapGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateRecognized) return;
     SecSetIconVisible(!g_iconVisible);
-    SecPanelLog(g_iconVisible ? @"图标已显示" : @"图标已隐藏");
+    SecDebugLog(g_iconVisible ? @"图标已显示" : @"图标已隐藏");
 }
 
 - (void)onCopyUUID:(id)sender {
     if (!g_deviceUUID.length) g_deviceUUID = [SecDeviceID keychainDeviceUUID];
     if (!g_deviceUUID.length) {
-        SecPanelLog(@"UUID 读取失败");
+        SecDebugLog(@"UUID 读取失败");
         return;
     }
     [UIPasteboard generalPasteboard].string = g_deviceUUID;
     if (g_licensed) {
-        SecPanelLog(@"已复制 UUID");
+        SecDebugLog(@"已复制 UUID");
         return;
     }
     UIAlertController *tip = [UIAlertController alertControllerWithTitle:nil
@@ -1518,7 +1501,7 @@ static void SecEnsureUI(void) {
     [ac addAction:[UIAlertAction actionWithTitle:@"激活" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         NSString *code = ac.textFields.firstObject.text;
         if (SecTryActivate(code)) return;
-        SecPanelLog(@"激活码无效");
+        SecDebugLog(@"激活码无效");
         UIAlertController *err = [UIAlertController alertControllerWithTitle:@"激活码无效"
                                                                      message:nil
                                                               preferredStyle:UIAlertControllerStyleAlert];
@@ -1528,7 +1511,7 @@ static void SecEnsureUI(void) {
     }]];
     UIViewController *vc = SecPresenterVC();
     if (!vc) {
-        SecPanelLog(@"无法弹出激活框");
+        SecDebugLog(@"无法弹出激活框");
         return;
     }
     [vc presentViewController:ac animated:YES completion:nil];
@@ -1594,7 +1577,7 @@ static void hook_setBody(id self, SEL _cmd, NSData *body) {
                 NSString *patched = PatchJsonForRequest(raw, url);
                 if (![patched isEqualToString:raw]) {
                     body = [patched dataUsingEncoding:NSUTF8StringEncoding];
-                    SecPanelLog(@"改包 %@", SecShortURL(url));
+                    SecDebugLog(@"改包 %@", SecShortURL(url));
                 }
             }
         }
@@ -1661,11 +1644,11 @@ static void SecInstallHooks(void) {
         SecInstallDealTaskHooks();
         SecInstallStayedHooks();
         dispatch_async(dispatch_get_main_queue(), ^{
-            SecPanelLog(@"业务 Hook 就绪");
+            SecDebugLog(@"业务 Hook 就绪");
         });
     });
 
-    SecPanelLog(@"Hooks 安装完成");
+    SecDebugLog(@"Hooks 安装完成");
 }
 
 #pragma mark - 入口
