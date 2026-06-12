@@ -288,68 +288,6 @@ static id SecSingletonFromClass(Class cls) {
     return nil;
 }
 
-static id SecResolveDealTaskTarget(void) {
-    if (g_dealTaskTarget) return g_dealTaskTarget;
-
-    SEL dealSel = SecDealTaskSel();
-
-    __block id found = nil;
-    SecWalkWindows(^(id node) {
-        if (found) return;
-        if ([node respondsToSelector:dealSel]) {
-            found = node;
-            NSLog(@"[SecToggle] dealTask 目标(界面) ← %@", [node class]);
-        }
-    });
-    if (found) return found;
-
-    SecWalkWindows(^(id node) {
-        if (found) return;
-        for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
-            id svc = SecKVCTry(node, key);
-            if (svc && [svc respondsToSelector:dealSel]) {
-                found = svc;
-                NSLog(@"[SecToggle] dealTask 目标(%@) ← %@", key, [svc class]);
-                return;
-            }
-        }
-    });
-    if (found) return found;
-
-    Class svcCls = NSClassFromString(@"XPDService");
-    id singleton = SecSingletonFromClass(svcCls);
-    if (singleton && [singleton respondsToSelector:dealSel]) return singleton;
-
-    int num = objc_getClassList(NULL, 0);
-    if (num <= 0) return nil;
-    Class *classes = (Class *)malloc((size_t)num * sizeof(Class));
-    if (!classes) return nil;
-    objc_getClassList(classes, num);
-
-    for (int i = 0; i < num; i++) {
-        const char *cn = class_getName(classes[i]);
-        if (strncmp(cn, "XPD", 3) != 0 && strncmp(cn, "AF", 2) != 0) continue;
-        if (!class_getInstanceMethod(classes[i], dealSel)) continue;
-        if (strcmp(cn, "XPDService") == 0) {
-            id inst = SecSingletonFromClass(classes[i]);
-            if (inst) {
-                free(classes);
-                return inst;
-            }
-        }
-        SecWalkWindows(^(id node) {
-            if (found) return;
-            if ([node isKindOfClass:classes[i]] && [node respondsToSelector:dealSel]) {
-                found = node;
-                NSLog(@"[SecToggle] dealTask 目标(类扫描) ← %@", NSStringFromClass(classes[i]));
-            }
-        });
-        if (found) break;
-    }
-    free(classes);
-    return found;
-}
-
 static NSUInteger SecArgCountForSelector(SEL sel) {
     if (!sel) return 0;
     return strchr(sel_getName(sel), ':') != NULL;
@@ -484,6 +422,68 @@ static void SecWalkWindows(void (^visit)(id)) {
         SecWalkCollect(win, visit, seen);
         SecWalkViewControllerTree(win.rootViewController, visit, seen);
     });
+}
+
+static id SecResolveDealTaskTarget(void) {
+    if (g_dealTaskTarget) return g_dealTaskTarget;
+
+    SEL dealSel = SecDealTaskSel();
+
+    __block id found = nil;
+    SecWalkWindows(^(id node) {
+        if (found) return;
+        if ([node respondsToSelector:dealSel]) {
+            found = node;
+            NSLog(@"[SecToggle] dealTask 目标(界面) ← %@", [node class]);
+        }
+    });
+    if (found) return found;
+
+    SecWalkWindows(^(id node) {
+        if (found) return;
+        for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
+            id svc = SecKVCTry(node, key);
+            if (svc && [svc respondsToSelector:dealSel]) {
+                found = svc;
+                NSLog(@"[SecToggle] dealTask 目标(%@) ← %@", key, [svc class]);
+                return;
+            }
+        }
+    });
+    if (found) return found;
+
+    Class svcCls = NSClassFromString(@"XPDService");
+    id singleton = SecSingletonFromClass(svcCls);
+    if (singleton && [singleton respondsToSelector:dealSel]) return singleton;
+
+    int num = objc_getClassList(NULL, 0);
+    if (num <= 0) return nil;
+    Class *classes = (Class *)malloc((size_t)num * sizeof(Class));
+    if (!classes) return nil;
+    objc_getClassList(classes, num);
+
+    for (int i = 0; i < num; i++) {
+        const char *cn = class_getName(classes[i]);
+        if (strncmp(cn, "XPD", 3) != 0 && strncmp(cn, "AF", 2) != 0) continue;
+        if (!class_getInstanceMethod(classes[i], dealSel)) continue;
+        if (strcmp(cn, "XPDService") == 0) {
+            id inst = SecSingletonFromClass(classes[i]);
+            if (inst) {
+                free(classes);
+                return inst;
+            }
+        }
+        SecWalkWindows(^(id node) {
+            if (found) return;
+            if ([node isKindOfClass:classes[i]] && [node respondsToSelector:dealSel]) {
+                found = node;
+                NSLog(@"[SecToggle] dealTask 目标(类扫描) ← %@", NSStringFromClass(classes[i]));
+            }
+        });
+        if (found) break;
+    }
+    free(classes);
+    return found;
 }
 
 static void SecCollectTaskIdsFromUI(void) {
