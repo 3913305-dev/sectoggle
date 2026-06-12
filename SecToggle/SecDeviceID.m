@@ -79,6 +79,12 @@ static NSString * const kSecActivationAccount = @"activation_code";
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
++ (NSString *)licenseExpiryDisplay {
+    NSString *code = [self savedActivationCode];
+    if (!code.length) return @"—";
+    return SecLicenseExpiryDisplay(SecLicenseExpiryFromCode(code));
+}
+
 + (BOOL)isLicensed {
     NSString *uuid = [self keychainDeviceUUID];
     NSString *code = [self savedActivationCode];

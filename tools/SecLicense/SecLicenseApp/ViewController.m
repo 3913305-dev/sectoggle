@@ -58,7 +58,7 @@
 
     self.codeField = [[UITextField alloc] init];
     self.codeField.borderStyle = UITextBorderStyleRoundedRect;
-    self.codeField.placeholder = @"XXXX-XXXX-XXXX-XXXX";
+    self.codeField.placeholder = @"XXXX-XXXX-XXXX-XXXX-YYYYMMDD";
     self.codeField.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
     self.codeField.autocorrectionType = UITextAutocorrectionTypeNo;
     self.codeField.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightRegular];
@@ -112,10 +112,16 @@
 
 - (void)refreshStatus {
     if ([SecDeviceID isLicensed]) {
-        self.statusLabel.text = @"已授权 ✓";
+        self.statusLabel.text = [NSString stringWithFormat:@"已授权 ✓  到期 %@", [SecDeviceID licenseExpiryDisplay]];
         self.statusLabel.textColor = [UIColor systemGreenColor];
     } else {
-        self.statusLabel.text = @"未授权";
+        NSString *code = [SecDeviceID savedActivationCode];
+        NSString *exp = SecLicenseExpiryFromCode(code);
+        if (code.length && exp.length && SecLicenseIsExpired(exp)) {
+            self.statusLabel.text = @"已过期，请重新发码";
+        } else {
+            self.statusLabel.text = @"未授权";
+        }
         self.statusLabel.textColor = [UIColor systemOrangeColor];
     }
 }
@@ -132,10 +138,10 @@
         return;
     }
     if (!SecLicenseVerify(self.deviceUUID, code, kSecLicenseDefaultSecret)) {
-        [self alert:@"激活码无效，请核对 UUID 与发码密钥"];
+        [self alert:@"激活码无效或已过期，请核对 UUID 与发码密钥"];
         return;
     }
-    NSString *formatted = SecLicenseGenerateCode(self.deviceUUID, kSecLicenseDefaultSecret);
+    NSString *formatted = SecLicenseCanonicalCode(code);
     [SecDeviceID saveActivationCode:formatted];
     self.codeField.text = formatted;
     [self refreshStatus];

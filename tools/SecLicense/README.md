@@ -33,7 +33,9 @@ python generate_code.py --cli "uuid..." --verify "XXXX-XXXX-XXXX-XXXX"
 ## 算法
 
 - 设备标识：首次启动写入 Keychain 的 UUID（抹机/删 Keychain 会变）。
-- 激活码：`HMAC-SHA256(密钥, 小写UUID)` 取前 8 字节 → `XXXX-XXXX-XXXX-XXXX`。
+- 激活码：`HMAC-SHA256(密钥, 小写UUID|YYYYMMDD)` 取前 8 字节 → `XXXX-XXXX-XXXX-XXXX-YYYYMMDD`。
+- 到期：末段 `YYYYMMDD` 当天 23:59:59 前有效；过期后须重新发码。
+- 旧版 4 段码（无日期）仍视为永久有效（兼容）。
 - 短码：`SHA256(UUID)` 前 12 位 hex，便于人工核对。
 
 ## 修改密钥（部署前必做）

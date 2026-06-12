@@ -902,13 +902,22 @@ static void SecInstallDealTaskHooks(void) {
 
 void SecUpdateStatusLabel(void) {
     if (!g_statusLabel) return;
+    NSString *expSuffix = @"";
+    if ([SecDeviceID isLicensed]) {
+        expSuffix = [NSString stringWithFormat:@" | 到期 %@", [SecDeviceID licenseExpiryDisplay]];
+    }
     if (g_stations.count == 0) {
-        g_statusLabel.text = @"[OFF] 请先打开任务详情";
+        if ([SecDeviceID isLicensed]) {
+            g_statusLabel.text = [NSString stringWithFormat:@"已授权%@", expSuffix];
+        } else {
+            g_statusLabel.text = @"[OFF] 请先打开任务详情";
+        }
         return;
     }
-    g_statusLabel.text = [NSString stringWithFormat:@"[%@] 共 %lu 站",
+    g_statusLabel.text = [NSString stringWithFormat:@"[%@] 共 %lu 站%@",
                           g_enabled ? @"ON" : @"OFF",
-                          (unsigned long)g_stations.count];
+                          (unsigned long)g_stations.count,
+                          expSuffix];
 }
 
 static void SecUpdateStationPicker(void) {
@@ -937,13 +946,16 @@ static BOOL SecTryActivate(NSString *code) {
     if (!g_deviceUUID.length) g_deviceUUID = [SecDeviceID keychainDeviceUUID];
     NSString *trimmed = [code stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!trimmed.length) return NO;
+    NSString *expiry = SecLicenseExpiryFromCode(trimmed);
+    if (expiry.length && SecLicenseIsExpired(expiry)) return NO;
     if (!SecLicenseVerify(g_deviceUUID, trimmed, kSecLicenseDefaultSecret)) return NO;
-    NSString *formatted = SecLicenseGenerateCode(g_deviceUUID, kSecLicenseDefaultSecret);
+    NSString *formatted = SecLicenseCanonicalCode(trimmed);
+    if (!formatted.length) return NO;
     if (![SecDeviceID saveActivationCode:formatted]) return NO;
     g_licensed = YES;
     SecInstallHooks();
     SecUpdateLicenseUI();
-    SecPanelLog(@"授权成功");
+    SecPanelLog(@"授权成功 到期 %@", [SecDeviceID licenseExpiryDisplay]);
     return YES;
 }
 
@@ -1190,10 +1202,12 @@ static void SecEnsureUI(void) {
 }
 
 - (void)onToggle:(UISwitch *)sender {
+    g_licensed = [SecDeviceID isLicensed];
     if (!g_licensed) {
         sender.on = NO;
         g_enabled = NO;
-        SecPanelLog(@"未授权，请先激活");
+        SecUpdateLicenseUI();
+        SecPanelLog(@"未授权或已过期，请重新发码");
         return;
     }
     g_enabled = sender.isOn;
@@ -1261,6 +1275,8 @@ static void SecEnsureUI(void) {
 }
 
 - (void)onIconTap:(id)sender {
+    g_licensed = [SecDeviceID isLicensed];
+    SecUpdateLicenseUI();
     SecSetPanelVisible(!g_panelVisible);
     SecPanelLog(g_panelVisible ? @"面板已显示" : @"面板已隐藏");
 }
@@ -1306,7 +1322,7 @@ static void SecEnsureUI(void) {
 
 - (void)onActivate:(id)sender {
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"输入激活码"
-                                                                message:@"格式 XXXX-XXXX-XXXX-XXXX"
+                                                                message:@"格式 XXXX-XXXX-XXXX-XXXX-YYYYMMDD"
                                                          preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"激活码";
@@ -1319,9 +1335,9 @@ static void SecEnsureUI(void) {
     [ac addAction:[UIAlertAction actionWithTitle:@"激活" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         NSString *code = ac.textFields.firstObject.text;
         if (SecTryActivate(code)) return;
-        SecPanelLog(@"激活码无效");
+        SecPanelLog(@"激活码无效或已过期");
         UIAlertController *err = [UIAlertController alertControllerWithTitle:@"激活失败"
-                                                                     message:@"请核对 UUID 与发码密钥"
+                                                                     message:@"请核对 UUID、密钥，或确认激活码未过期"
                                                               preferredStyle:UIAlertControllerStyleAlert];
         [err addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *vc = SecPresenterVC();

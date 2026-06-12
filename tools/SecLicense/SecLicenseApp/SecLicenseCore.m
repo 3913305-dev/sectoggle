@@ -14,12 +14,52 @@ static NSString *SecLicenseFormatGroups(NSString *hex16) {
     return [parts componentsJoinedByString:@"-"];
 }
 
-static NSData *SecLicenseHMAC(NSString *uuid, NSString *secret) {
+static NSData *SecLicenseHMAC(NSString *message, NSString *secret) {
     const char *key = [secret UTF8String];
-    const char *msg = [uuid UTF8String];
+    const char *msg = [message UTF8String];
     unsigned char mac[CC_SHA256_DIGEST_LENGTH];
     CCHmac(kCCHmacAlgSHA256, key, strlen(key), msg, strlen(msg), mac);
     return [NSData dataWithBytes:mac length:CC_SHA256_DIGEST_LENGTH];
+}
+
+static BOOL SecLicenseValidExpiry(NSString *yyyymmdd) {
+    if (yyyymmdd.length != 8) return NO;
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+    if ([yyyymmdd rangeOfCharacterFromSet:[digits invertedSet]].location != NSNotFound) return NO;
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"yyyyMMdd";
+    f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    return [f dateFromString:yyyymmdd] != nil;
+}
+
+static BOOL SecLicenseParseCode(NSString *raw, NSString **outHex16, NSString **outExpiry) {
+    if (outHex16) *outHex16 = nil;
+    if (outExpiry) *outExpiry = nil;
+    if (!raw.length) return NO;
+
+    NSArray *parts = [[raw uppercaseString] componentsSeparatedByString:@"-"];
+    NSMutableArray *clean = [NSMutableArray array];
+    for (NSString *p in parts) {
+        NSString *t = [p stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (t.length) [clean addObject:t];
+    }
+
+    if (clean.count == 4) {
+        NSString *hex = [[clean componentsJoinedByString:@""] stringByReplacingOccurrencesOfString:@"-" withString:@""];
+        if (hex.length != 16) return NO;
+        if (outHex16) *outHex16 = hex;
+        return YES;
+    }
+    if (clean.count == 5) {
+        NSString *hex = [[[clean subarrayWithRange:NSMakeRange(0, 4)] componentsJoinedByString:@""]
+                         stringByReplacingOccurrencesOfString:@"-" withString:@""];
+        NSString *expiry = clean[4];
+        if (hex.length != 16 || !SecLicenseValidExpiry(expiry)) return NO;
+        if (outHex16) *outHex16 = hex;
+        if (outExpiry) *outExpiry = expiry;
+        return YES;
+    }
+    return NO;
 }
 
 NSString *SecLicenseNormalizeUUID(NSString *raw) {
@@ -57,6 +97,55 @@ NSString *SecLicenseDeviceCodeShort(NSString *uuid) {
             [hex substringWithRange:NSMakeRange(8, 4)]];
 }
 
+NSString *SecLicenseCanonicalCode(NSString *raw) {
+    NSString *hex = nil;
+    NSString *expiry = nil;
+    if (!SecLicenseParseCode(raw, &hex, &expiry)) return nil;
+    NSString *base = SecLicenseFormatGroups(hex);
+    if (!base.length) return nil;
+    return expiry.length ? [NSString stringWithFormat:@"%@-%@", base, expiry] : base;
+}
+
+NSString *SecLicenseExpiryFromCode(NSString *code) {
+    NSString *expiry = nil;
+    if (!SecLicenseParseCode(code, NULL, &expiry)) return nil;
+    return expiry;
+}
+
+NSString *SecLicenseExpiryDisplay(NSString *yyyymmdd) {
+    if (!yyyymmdd.length) return @"永久";
+    if (yyyymmdd.length != 8) return yyyymmdd;
+    return [NSString stringWithFormat:@"%@-%@-%@",
+            [yyyymmdd substringWithRange:NSMakeRange(0, 4)],
+            [yyyymmdd substringWithRange:NSMakeRange(4, 2)],
+            [yyyymmdd substringWithRange:NSMakeRange(6, 2)]];
+}
+
+BOOL SecLicenseIsExpired(NSString *yyyymmdd) {
+    if (!yyyymmdd.length) return NO;
+    if (!SecLicenseValidExpiry(yyyymmdd)) return YES;
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"yyyyMMdd";
+    f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    NSDate *day = [f dateFromString:yyyymmdd];
+    if (!day) return YES;
+    NSDate *end = [day dateByAddingTimeInterval:86400.0 - 1.0];
+    return [[NSDate date] compare:end] == NSOrderedDescending;
+}
+
+NSString *SecLicenseGenerateCodeWithExpiry(NSString *uuid, NSString *secret, NSString *expiryYYYYMMDD) {
+    NSString *norm = SecLicenseNormalizeUUID(uuid);
+    if (!norm || !secret.length || !SecLicenseValidExpiry(expiryYYYYMMDD)) return nil;
+    NSString *payload = [NSString stringWithFormat:@"%@|%@", norm, expiryYYYYMMDD];
+    NSData *mac = SecLicenseHMAC(payload, secret);
+    const unsigned char *bytes = mac.bytes;
+    NSMutableString *hex = [NSMutableString stringWithCapacity:16];
+    for (int i = 0; i < 8; i++) {
+        [hex appendFormat:@"%02X", bytes[i]];
+    }
+    return [NSString stringWithFormat:@"%@-%@", SecLicenseFormatGroups(hex), expiryYYYYMMDD];
+}
+
 NSString *SecLicenseGenerateCode(NSString *uuid, NSString *secret) {
     NSString *norm = SecLicenseNormalizeUUID(uuid);
     if (!norm || !secret.length) return nil;
@@ -70,9 +159,30 @@ NSString *SecLicenseGenerateCode(NSString *uuid, NSString *secret) {
 }
 
 BOOL SecLicenseVerify(NSString *uuid, NSString *code, NSString *secret) {
-    NSString *expected = SecLicenseGenerateCode(uuid, secret);
-    if (!expected.length) return NO;
-    NSString *got = SecLicenseFormatGroups(code);
-    if (got.length != expected.length) return NO;
-    return [expected isEqualToString:got];
+    NSString *norm = SecLicenseNormalizeUUID(uuid);
+    if (!norm || !secret.length) return NO;
+
+    NSString *hex = nil;
+    NSString *expiry = nil;
+    if (!SecLicenseParseCode(code, &hex, &expiry)) return NO;
+
+    if (expiry.length) {
+        if (SecLicenseIsExpired(expiry)) return NO;
+        NSString *payload = [NSString stringWithFormat:@"%@|%@", norm, expiry];
+        NSData *mac = SecLicenseHMAC(payload, secret);
+        const unsigned char *bytes = mac.bytes;
+        NSMutableString *expected = [NSMutableString stringWithCapacity:16];
+        for (int i = 0; i < 8; i++) {
+            [expected appendFormat:@"%02X", bytes[i]];
+        }
+        return [SecLicenseFormatGroups(expected) isEqualToString:SecLicenseFormatGroups(hex)];
+    }
+
+    NSData *mac = SecLicenseHMAC(norm, secret);
+    const unsigned char *bytes = mac.bytes;
+    NSMutableString *expected = [NSMutableString stringWithCapacity:16];
+    for (int i = 0; i < 8; i++) {
+        [expected appendFormat:@"%02X", bytes[i]];
+    }
+    return [SecLicenseFormatGroups(expected) isEqualToString:SecLicenseFormatGroups(hex)];
 }

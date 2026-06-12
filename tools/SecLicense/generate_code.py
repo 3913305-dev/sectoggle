@@ -11,6 +11,9 @@ from tkinter import messagebox, ttk
 from license_common import (
     DEFAULT_SECRET,
     device_code_short,
+    expiry_display,
+    expiry_from_code,
+    expiry_from_days,
     generate_activation_code,
     normalize_uuid,
     verify_activation_code,
@@ -21,8 +24,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("SecToggle 发码工具")
-        self.geometry("560x420")
-        self.minsize(480, 380)
+        self.geometry("580x480")
+        self.minsize(500, 440)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -32,7 +35,7 @@ class App(tk.Tk):
 
         ttk.Label(
             frm,
-            text="设备 UUID（用户在 SecLicense App 里复制）",
+            text="设备 UUID（SEC 面板或 SecLicense App 里复制）",
             font=("Segoe UI", 10, "bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
 
@@ -47,38 +50,59 @@ class App(tk.Tk):
             row=2, column=1, sticky="w", **pad
         )
 
-        ttk.Label(frm, text="密钥（须与 iOS 端一致）").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="有效天数").grid(row=3, column=0, sticky="w", **pad)
+        days_row = ttk.Frame(frm)
+        days_row.grid(row=3, column=1, sticky="w", **pad)
+        self.days_var = tk.IntVar(value=365)
+        ttk.Spinbox(days_row, from_=1, to=3650, textvariable=self.days_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(days_row, text="  天").pack(side=tk.LEFT)
+        self.expiry_preview_var = tk.StringVar(value="—")
+        ttk.Label(frm, text="预计到期").grid(row=4, column=0, sticky="w", **pad)
+        ttk.Label(frm, textvariable=self.expiry_preview_var, font=("Consolas", 11)).grid(
+            row=4, column=1, sticky="w", **pad
+        )
+        self.days_var.trace_add("write", lambda *_: self._refresh_expiry_preview())
+        self._refresh_expiry_preview()
+
+        ttk.Label(frm, text="密钥（须与 iOS 端一致）").grid(row=5, column=0, sticky="w", **pad)
         self.secret_var = tk.StringVar(value=DEFAULT_SECRET)
         ttk.Entry(frm, textvariable=self.secret_var, width=52, show="*").grid(
-            row=4, column=0, columnspan=2, sticky="ew", **pad
+            row=6, column=0, columnspan=2, sticky="ew", **pad
         )
 
         btn_row = ttk.Frame(frm)
-        btn_row.grid(row=5, column=0, columnspan=2, sticky="w", **pad)
+        btn_row.grid(row=7, column=0, columnspan=2, sticky="w", **pad)
         ttk.Button(btn_row, text="生成激活码", command=self._generate).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="校验激活码", command=self._verify).pack(side=tk.LEFT)
 
         ttk.Label(frm, text="激活码", font=("Segoe UI", 10, "bold")).grid(
-            row=6, column=0, columnspan=2, sticky="w", **pad
+            row=8, column=0, columnspan=2, sticky="w", **pad
         )
         self.code_var = tk.StringVar()
-        code_entry = ttk.Entry(frm, textvariable=self.code_var, width=52, font=("Consolas", 12))
-        code_entry.grid(row=7, column=0, columnspan=2, sticky="ew", **pad)
+        code_entry = ttk.Entry(frm, textvariable=self.code_var, width=52, font=("Consolas", 11))
+        code_entry.grid(row=9, column=0, columnspan=2, sticky="ew", **pad)
 
-        ttk.Button(frm, text="复制激活码", command=self._copy).grid(row=8, column=0, sticky="w", **pad)
+        ttk.Button(frm, text="复制激活码", command=self._copy).grid(row=10, column=0, sticky="w", **pad)
 
         ttk.Separator(frm, orient=tk.HORIZONTAL).grid(
-            row=9, column=0, columnspan=2, sticky="ew", pady=12
+            row=11, column=0, columnspan=2, sticky="ew", pady=12
         )
         help_text = (
-            "流程：iPhone 安装 SecLicense（巨魔）→ 复制设备 UUID → 粘贴到上方 → 生成激活码\n"
-            "发给用户后在 SecLicense 里输入并保存。抹机后 Keychain UUID 会变，需重新发码。"
+            "激活码格式：XXXX-XXXX-XXXX-XXXX-YYYYMMDD（末段为到期日）\n"
+            "到期日当天 23:59:59 前有效；过期后需重新发码。"
         )
-        ttk.Label(frm, text=help_text, wraplength=520, justify=tk.LEFT).grid(
-            row=10, column=0, columnspan=2, sticky="w", **pad
+        ttk.Label(frm, text=help_text, wraplength=540, justify=tk.LEFT).grid(
+            row=12, column=0, columnspan=2, sticky="w", **pad
         )
 
         frm.columnconfigure(1, weight=1)
+
+    def _refresh_expiry_preview(self) -> None:
+        try:
+            days = int(self.days_var.get())
+            self.expiry_preview_var.set(expiry_display(expiry_from_days(days)))
+        except (ValueError, tk.TclError):
+            self.expiry_preview_var.set("—")
 
     def _refresh_short(self) -> None:
         raw = self.uuid_var.get().strip()
@@ -94,11 +118,14 @@ class App(tk.Tk):
         try:
             uuid_norm = normalize_uuid(self.uuid_var.get())
             secret = self.secret_var.get().strip()
+            days = int(self.days_var.get())
             if not secret:
                 raise ValueError("密钥不能为空")
-            code = generate_activation_code(uuid_norm, secret)
+            code = generate_activation_code(uuid_norm, secret, valid_days=days)
             self.code_var.set(code)
             self.short_var.set(device_code_short(uuid_norm))
+            exp = expiry_from_code(code)
+            self.expiry_preview_var.set(expiry_display(exp))
         except ValueError as exc:
             messagebox.showerror("错误", str(exc))
 
@@ -110,10 +137,11 @@ class App(tk.Tk):
             if not code.strip():
                 raise ValueError("请先填写或生成激活码")
             ok = verify_activation_code(uuid_norm, code, secret)
+            exp = expiry_from_code(code)
             if ok:
-                messagebox.showinfo("校验", "激活码与设备 UUID 匹配 ✓")
+                messagebox.showinfo("校验", f"激活码有效 ✓\n到期：{expiry_display(exp)}")
             else:
-                messagebox.showwarning("校验", "激活码不匹配 ✗")
+                messagebox.showwarning("校验", "激活码无效、已过期或 UUID 不匹配 ✗")
         except ValueError as exc:
             messagebox.showerror("错误", str(exc))
 
@@ -141,16 +169,25 @@ def cli_main(args: list[str]) -> int:
     parser = argparse.ArgumentParser(description="SecToggle 发码 CLI")
     parser.add_argument("uuid", help="设备 UUID")
     parser.add_argument("--secret", default=DEFAULT_SECRET, help="HMAC 密钥")
+    parser.add_argument("--days", type=int, default=365, help="有效天数")
+    parser.add_argument("--expiry", help="到期日 YYYYMMDD")
     parser.add_argument("--verify", metavar="CODE", help="校验激活码")
     ns = parser.parse_args(args)
     try:
         if ns.verify:
             ok = verify_activation_code(ns.uuid, ns.verify, ns.secret)
+            exp = expiry_from_code(ns.verify)
             print("OK" if ok else "FAIL")
+            if exp:
+                print(f"到期: {expiry_display(exp)}")
             return 0 if ok else 1
-        code = generate_activation_code(ns.uuid, ns.secret)
+        if ns.expiry:
+            code = generate_activation_code(ns.uuid, ns.secret, expiry_yyyymmdd=ns.expiry)
+        else:
+            code = generate_activation_code(ns.uuid, ns.secret, valid_days=ns.days)
         print(code)
         print(f"短码: {device_code_short(ns.uuid)}")
+        print(f"到期: {expiry_display(expiry_from_code(code))}")
         return 0
     except ValueError as exc:
         print(f"错误: {exc}", file=sys.stderr)

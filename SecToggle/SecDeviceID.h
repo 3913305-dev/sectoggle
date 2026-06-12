@@ -5,5 +5,6 @@
 + (NSString *)identifierForVendor;
 + (BOOL)saveActivationCode:(NSString *)code;
 + (NSString *)savedActivationCode;
++ (NSString *)licenseExpiryDisplay;
 + (BOOL)isLicensed;
 @end
