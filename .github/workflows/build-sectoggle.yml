@@ -19,14 +19,22 @@ jobs:
           echo "=== source head ==="
           head -12 SecToggle.m
           set -e
-          xcrun -sdk iphoneos clang -arch arm64 \
+          if ! xcrun -sdk iphoneos clang -arch arm64 \
             -Wno-deprecated-declarations \
             -Wno-incompatible-function-pointer-types \
             -dynamiclib -fobjc-arc \
             -framework UIKit -framework Foundation -framework CoreLocation \
             -install_name @executable_path/SecToggle.dylib \
             -o SecToggle.dylib SecToggle.m \
-            -miphoneos-version-min=13.0 2>&1 | tee build.log || (cat build.log; exit 1)
+            -miphoneos-version-min=13.0 > build.log 2>&1; then
+            echo "=== build failed ==="
+            cat build.log
+            grep -E 'error:|warning:' build.log | head -20 | while IFS= read -r line; do
+              echo "::error title=clang::$line"
+            done
+            exit 1
+          fi
+          cat build.log
           file SecToggle.dylib
           ls -la SecToggle.dylib
 
