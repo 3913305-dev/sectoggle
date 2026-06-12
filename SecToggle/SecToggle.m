@@ -23,6 +23,10 @@ static id SecPlateScanTargetForObject(id obj);
 static UIViewController *SecPlateCameraHostVC(UIViewController *cameraVC);
 static void SecInstallPlateHooks(void);
 static void SecInstallSigninHooks(void);
+static void SecInstallClockHooks(void);
+static void SecActivateClockFromObject(id obj);
+static void SecUpdateClockTargetFromObject(id obj, NSInteger depth);
+static void SecSetClockActive(BOOL active);
 static void SecPanelLog(NSString *format, ...);
 static void SecDebugLog(NSString *format, ...);
 static NSString *SecStationTitle(NSDictionary *t);
@@ -120,6 +124,9 @@ static NSTimeInterval g_actionZddmUntil = 0;
 static CLLocation *g_fakeLocation = nil;
 static NSTimer *g_gpsPulseTimer = nil;
 static NSInteger g_gpsPulseIndex = 0;
+static NSMutableDictionary *g_clockTarget = nil;
+static BOOL g_clockActive = NO;
+static NSTimeInterval g_clockActiveUntil = 0;
 
 static NSMutableArray<NSArray *> *g_routePoints = nil;
 static NSMutableArray<NSNumber *> *g_routeLegEnds = nil;
@@ -157,6 +164,91 @@ static double ParseDouble(id v) {
     if (!v || v == (id)kCFNull) return NAN;
     if ([v isKindOfClass:[NSNumber class]]) return [v doubleValue];
     return [[v description] doubleValue];
+}
+
+static BOOL SecLooksLikeChinaCoordPair(double a, double b, double *outLat, double *outLon) {
+    if (a >= 18.0 && a <= 54.0 && b >= 73.0 && b <= 135.0) {
+        *outLat = a;
+        *outLon = b;
+        return YES;
+    }
+    if (b >= 18.0 && b <= 54.0 && a >= 73.0 && a <= 135.0) {
+        *outLat = b;
+        *outLon = a;
+        return YES;
+    }
+    return NO;
+}
+
+static void SecApplyClockTarget(double lon, double lat, double zdbj, NSString *name) {
+    if (isnan(lon) || isnan(lat) || (lon == 0 && lat == 0)) return;
+    if (!g_clockTarget) g_clockTarget = [NSMutableDictionary dictionary];
+    g_clockTarget[@"jd"] = @(lon);
+    g_clockTarget[@"wd"] = @(lat);
+    if (zdbj > 0) g_clockTarget[@"zdbj"] = @(zdbj);
+    else if (!g_clockTarget[@"zdbj"]) g_clockTarget[@"zdbj"] = @(200);
+    if (name.length) g_clockTarget[@"name"] = name;
+    g_clockTarget[@"zddm"] = @"__clock__";
+}
+
+static void SecUpdateClockTargetFromDict(NSDictionary *dict) {
+    if (!dict) return;
+    BOOL clockish = dict[@"n_dkddjd"] || dict[@"dkddjd"] || dict[@"n_dkddwd"] || dict[@"dkddwd"] ||
+                    dict[@"c_dkdd"] || dict[@"dkddbj"];
+    if (!clockish) return;
+
+    double lon = ParseDouble(dict[@"n_dkddjd"] ?: dict[@"dkddjd"]);
+    double lat = ParseDouble(dict[@"n_dkddwd"] ?: dict[@"dkddwd"]);
+    double zdbj = ParseDouble(dict[@"dkddbj"] ?: dict[@"n_dkddbj"] ?: dict[@"n_zdbj"]);
+    NSString *name = [dict[@"c_dkdd"] ?: dict[@"dkdd"] ?: dict[@"checkName"] ?: @"考勤打卡" description];
+    if ([name isEqualToString:@"(null)"] || [name isEqualToString:@"<null>"]) name = @"考勤打卡";
+    SecApplyClockTarget(lon, lat, zdbj, name);
+}
+
+static void SecUpdateClockTargetFromObject(id obj, NSInteger depth) {
+    if (!obj || depth > 12) return;
+    if ([obj isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)obj) SecUpdateClockTargetFromObject(item, depth + 1);
+        return;
+    }
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        SecUpdateClockTargetFromDict((NSDictionary *)obj);
+        for (id k in (NSDictionary *)obj) {
+            SecUpdateClockTargetFromObject(((NSDictionary *)obj)[k], depth + 1);
+        }
+        return;
+    }
+    if ([NSStringFromClass([obj class]) isEqualToString:@"XPDSignActionView"]) {
+        double a = ParseDouble(SecKVCTry(obj, @"kqds"));
+        double b = ParseDouble(SecKVCTry(obj, @"kqrws"));
+        double lat = NAN, lon = NAN;
+        if (SecLooksLikeChinaCoordPair(a, b, &lat, &lon)) {
+            SecApplyClockTarget(lon, lat, 200, @"考勤打卡");
+        }
+        id punch = SecKVCTry(obj, @"punchData") ?: SecKVCTry(obj, @"_punchData");
+        if (punch) SecUpdateClockTargetFromObject(punch, depth + 1);
+        id checks = SecKVCTry(obj, @"checkInformations") ?: SecKVCTry(obj, @"_checkInformations");
+        if (checks) SecUpdateClockTargetFromObject(checks, depth + 1);
+    }
+}
+
+static void SecSetClockActive(BOOL active) {
+    g_clockActive = active;
+    g_clockActiveUntil = active ? [[NSDate date] timeIntervalSince1970] + 180.0 : 0;
+}
+
+static BOOL SecClockIsActive(void) {
+    if (!g_clockActive) return NO;
+    if ([[NSDate date] timeIntervalSince1970] > g_clockActiveUntil) {
+        g_clockActive = NO;
+        return NO;
+    }
+    return YES;
+}
+
+static NSDictionary *SecClockTarget(void) {
+    if (!SecClockIsActive() || !g_clockTarget.count) return nil;
+    return g_clockTarget;
 }
 
 static void ExtractStationsFromObject(id obj, NSInteger depth) {
@@ -319,6 +411,7 @@ static BOOL SecBindActionStationFromObject(id obj) {
 }
 
 static BOOL SecShouldUseExactCoords(void) {
+    if (SecClockIsActive() && g_clockTarget.count) return YES;
     if (g_actionZddm.length && [[NSDate date] timeIntervalSince1970] < g_actionZddmUntil) return YES;
     if (g_enabled && !g_autoMode) return YES;
     if (g_routeActive && g_routeFinished) return YES;
@@ -340,6 +433,8 @@ static NSString *SecExtractZddmFromJson(NSString *raw) {
 }
 
 static NSDictionary *SecResolveSpoofStation(id appZddm, NSString *jsonRaw) {
+    NSDictionary *clock = SecClockTarget();
+    if (clock) return clock;
     NSDictionary *s = SecStationForZddm(appZddm);
     if (!s && jsonRaw.length) {
         s = SecStationForZddm(SecExtractZddmFromJson(jsonRaw));
@@ -531,7 +626,10 @@ static void SecSortStations(void) {
 }
 
 static NSDictionary *SpoofTarget(void) {
-    if (g_stations.count == 0 || !g_enabled) return nil;
+    if (!g_enabled) return nil;
+    NSDictionary *clock = SecClockTarget();
+    if (clock) return clock;
+    if (g_stations.count == 0) return nil;
     if (g_actionZddm.length && [[NSDate date] timeIntervalSince1970] < g_actionZddmUntil) {
         NSDictionary *action = SecStationForZddm(g_actionZddm);
         if (action) return action;
@@ -779,6 +877,7 @@ static BOOL SecBodyLooksLikeGps(NSString *raw) {
     dispatch_once(&onceToken, ^{
         needles = @[
             @"\"n_jd\"", @"\"n_wd\"", @"\"n_zdjd\"", @"\"n_zdwd\"",
+            @"\"n_dkddjd\"", @"\"n_dkddwd\"", @"\"dkddjd\"", @"\"dkddwd\"",
             @"\"latitude\"", @"\"longitude\"", @"\"gpslatitude\"", @"\"gpslongitude\"",
             @"\"lat\"", @"\"lng\""
         ];
@@ -796,7 +895,8 @@ static BOOL SecShouldPatchRequestURL(NSString *url) {
     dispatch_once(&onceToken, ^{
         keys = @[
             @"car/", @"rwcz", @"location", @"withGPS", @"withgps",
-            @"gps", @"track", @"position", @"trajectory", @"driver", @"/qd"
+            @"gps", @"track", @"position", @"trajectory", @"driver", @"/qd",
+            @"clockIn", @"clockSet", @"/user/clock"
         ];
     });
     for (NSString *k in keys) {
@@ -832,9 +932,11 @@ static void SecApplyGpsPatchToJson(NSString **inOutRaw, double wd, double jd, NS
          [url containsString:@"zdlk"] || [url containsString:@"/qd"]);
 
     NSArray *allKeys = @[@"n_jd", @"n_wd", @"n_zdjd", @"n_zdwd",
+                         @"n_dkddjd", @"n_dkddwd", @"dkddjd", @"dkddwd",
                          @"gpslongitude", @"gpslatitude", @"longitude", @"latitude", @"lng", @"lat"];
     for (NSString *key in allKeys) {
         BOOL isLat = [key isEqualToString:@"n_wd"] || [key isEqualToString:@"n_zdwd"] ||
+                     [key isEqualToString:@"n_dkddwd"] || [key isEqualToString:@"dkddwd"] ||
                      [key isEqualToString:@"lat"] || [key isEqualToString:@"latitude"] ||
                      [key isEqualToString:@"gpslatitude"];
         out = SecPatchCoordField(out, key, isLat ? wd : jd);
@@ -851,6 +953,7 @@ static void SecApplyGpsPatchToJson(NSString **inOutRaw, double wd, double jd, NS
 
 static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
     if (!g_enabled || !raw.length) return raw;
+    if (!g_stations.count && !g_clockTarget.count) return raw;
 
     NSString *bodyZddm = SecExtractZddmFromJson(raw);
     NSDictionary *t = SecResolveSpoofStation(nil, raw);
@@ -1293,6 +1396,7 @@ static void hook_submitSingin(id self, SEL _cmd, id bcdh, id lat, id lon, id com
 static id hook_geofenceLocationError(id self, SEL _cmd, id location) {
     if (g_enabled) {
         SecBindActionStationFromObject(self);
+        if (!g_clockTarget.count) SecActivateClockFromObject(self);
         SecRefreshFakeLocation();
         return nil;
     }
@@ -1352,6 +1456,125 @@ static void SecInstallSigninHooks(void) {
     free(classes);
     installed = YES;
     SecDebugLog(@"签到 Hook 就绪");
+}
+
+#pragma mark - 考勤打卡 Hook
+
+static NSMutableDictionary *g_clockOrigIMPs = nil;
+
+static void SecHookClockSelector(Class cls, SEL sel, IMP hookImp) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    IMP orig = method_getImplementation(m);
+    if (orig == hookImp) return;
+    if (!g_clockOrigIMPs) g_clockOrigIMPs = [NSMutableDictionary dictionary];
+    g_clockOrigIMPs[SecScanHookKey(cls, sel)] = [NSValue valueWithPointer:orig];
+    method_setImplementation(m, hookImp);
+    SecDebugLog(@"Hook %@ ← %@", NSStringFromSelector(sel), NSStringFromClass(cls));
+}
+
+static id SecPatchClockInfo(id info) {
+    if (!g_enabled) return info;
+    NSDictionary *t = SecClockTarget() ?: g_clockTarget;
+    if (!t.count) return info;
+    double wd = 0, jd = 0;
+    SecSpoofedCoords(t, &wd, &jd, NO);
+
+    NSMutableDictionary *m = nil;
+    if ([info isKindOfClass:[NSMutableDictionary class]]) {
+        m = (NSMutableDictionary *)info;
+    } else if ([info isKindOfClass:[NSDictionary class]]) {
+        m = [info mutableCopy];
+    } else {
+        return info;
+    }
+
+    NSArray *latKeys = @[@"n_dkddwd", @"dkddwd", @"n_wd", @"wd", @"latitude", @"gpslatitude", @"lat"];
+    NSArray *lonKeys = @[@"n_dkddjd", @"dkddjd", @"n_jd", @"jd", @"longitude", @"gpslongitude", @"lng", @"lon"];
+    for (NSString *k in latKeys) {
+        if (m[k]) m[k] = @(wd);
+    }
+    for (NSString *k in lonKeys) {
+        if (m[k]) m[k] = @(jd);
+    }
+    return m;
+}
+
+static void SecActivateClockFromObject(id obj) {
+    if (!g_enabled || !obj) return;
+    SecUpdateClockTargetFromObject(obj, 0);
+    if (!g_clockTarget.count) return;
+    SecSetClockActive(YES);
+    SecRefreshFakeLocation();
+    SecPanelLog(@"考勤定位：%@", SecStationTitle(g_clockTarget));
+}
+
+static void hook_setPunchData(id self, SEL _cmd, id data) {
+    SecActivateClockFromObject(data);
+    if (data) SecActivateClockFromObject(self);
+    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    if (!v) return;
+    IMP orig = [v pointerValue];
+    ((void (*)(id, SEL, id))orig)(self, _cmd, data);
+}
+
+static void hook_signActionMoveToWindow(id self, SEL _cmd) {
+    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    IMP orig = v ? [v pointerValue] : NULL;
+    if (orig) ((void (*)(id, SEL))orig)(self, _cmd);
+    if (g_enabled && self && [(id)self window]) {
+        SecActivateClockFromObject(self);
+    }
+}
+
+static void hook_userClockWithInfo(id self, SEL _cmd, id info, id completion) {
+    if (g_enabled) {
+        SecUpdateClockTargetFromObject(info, 0);
+        if (g_clockTarget.count) SecSetClockActive(YES);
+        info = SecPatchClockInfo(info);
+        SecRefreshFakeLocation();
+        if (g_clockTarget.count) {
+            SecPanelLog(@"考勤打卡 %@", SecStationTitle(g_clockTarget));
+        }
+    }
+    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    if (!v) return;
+    IMP orig = [v pointerValue];
+    ((void (*)(id, SEL, id, id))orig)(self, _cmd, info, completion);
+}
+
+static void hook_userClockContentWithInfo(id self, SEL _cmd, id info, id type, id completion) {
+    if (g_enabled && info) {
+        SecUpdateClockTargetFromObject(info, 0);
+        if (g_clockTarget.count) SecSetClockActive(YES);
+    }
+    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    if (!v) return;
+    IMP orig = [v pointerValue];
+    ((void (*)(id, SEL, id, id, id))orig)(self, _cmd, info, type, completion);
+}
+
+static void SecInstallClockHooks(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+
+    Class signView = NSClassFromString(@"XPDSignActionView");
+    if (signView) {
+        SecHookClockSelector(signView, @selector(setPunchData:), (IMP)hook_setPunchData);
+        if (class_getInstanceMethod(signView, @selector(didMoveToWindow))) {
+            SecHookClockSelector(signView, @selector(didMoveToWindow), (IMP)hook_signActionMoveToWindow);
+        }
+    }
+
+    Class svc = NSClassFromString(@"XPDService");
+    if (svc) {
+        SecHookClockSelector(svc, @selector(userClockWithInfo:completion:), (IMP)hook_userClockWithInfo);
+        SecHookClockSelector(svc, @selector(userClockContentWithInfo:type:completion:),
+                              (IMP)hook_userClockContentWithInfo);
+    }
+
+    installed = YES;
+    SecDebugLog(@"考勤打卡 Hook 就绪");
 }
 
 #pragma mark - 扫牌自动填车牌
@@ -2279,6 +2502,7 @@ static void SecEnsureUI(void) {
         SecStopGpsPulse();
         g_routeActive = NO;
         g_routeFinished = NO;
+        SecSetClockActive(NO);
     }
 }
 
@@ -2469,7 +2693,8 @@ static CLLocation *hook_managerLocation(id self, SEL _cmd) {
 static void (*orig_setBody)(id, SEL, NSData *);
 
 static void hook_setBody(id self, SEL _cmd, NSData *body) {
-    if (body.length > 0 && body.length < 65536 && g_enabled && g_stations.count) {
+    if (body.length > 0 && body.length < 65536 && g_enabled &&
+        (g_stations.count || g_clockTarget.count)) {
         NSString *raw = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
         if (raw) {
             NSMutableURLRequest *req = (NSMutableURLRequest *)self;
@@ -2492,7 +2717,10 @@ static id (*orig_jsonData)(id, SEL, NSData *, NSJSONReadingOptions, NSError **);
 static id hook_jsonData(id self, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **err) {
     id obj = orig_jsonData(self, _cmd, data, opt, err);
     if (obj) {
-        @try { ExtractStationsFromObject(obj, 0); } @catch (NSException *e) {}
+        @try {
+            ExtractStationsFromObject(obj, 0);
+            SecUpdateClockTargetFromObject(obj, 0);
+        } @catch (NSException *e) {}
     }
     return obj;
 }
@@ -2547,6 +2775,7 @@ static void SecInstallHooks(void) {
         SecInstallStayedHooks();
         SecInstallPlateHooks();
         SecInstallSigninHooks();
+        SecInstallClockHooks();
         dispatch_async(dispatch_get_main_queue(), ^{
             SecDebugLog(@"业务 Hook 就绪");
         });
