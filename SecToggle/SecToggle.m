@@ -260,7 +260,7 @@ static void SecPanelLog(NSString *format, ...) {
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    SecPanelLog(@"%@", msg);
+    NSLog(@"[SecToggle] %@", msg);
 
     if (!g_logLines) g_logLines = [NSMutableArray array];
     static NSDateFormatter *df;
@@ -1002,7 +1002,7 @@ static void SecCreatePanel(void) {
 
     g_logLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 18, pw - 24, ph - 122)];
     g_logLabel.textColor = [UIColor colorWithRed:0.55 green:0.85 blue:1.0 alpha:1];
-    g_logLabel.font = [UIFont monospacedDigitSystemFontOfSize:9 weight:UIFontWeightRegular];
+    g_logLabel.font = [UIFont systemFontOfSize:9];
     g_logLabel.numberOfLines = kSecMaxLogLines;
     g_logLabel.text = @"—";
     [logBg addSubview:g_logLabel];
@@ -1135,8 +1135,8 @@ static void SecInstallHooks(void) {
 
 __attribute__((constructor))
 static void SecToggleEntry(void) {
-    SecInstallHooks();
     dispatch_async(dispatch_get_main_queue(), ^{
+        SecInstallHooks();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             SecCreatePanel();
         });
