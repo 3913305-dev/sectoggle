@@ -15,6 +15,7 @@ static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
 static void SecInstallTapOpeInHooks(void);
 static void SecShowSimResult(NSString *msg);
+static SEL SecDealTaskSel(void);
 
 @interface SecToggleHandler : NSObject
 + (instancetype)shared;
@@ -267,24 +268,86 @@ static BOOL SecClassMatches(id obj) {
     return [cn hasPrefix:@"AMap"] || [cn containsString:@"GeoFence"];
 }
 
-static id SecResolveDealTaskTarget(void) {
-    if (g_dealTaskTarget) return g_dealTaskTarget;
+static SEL SecDealTaskSel(void) {
+    return @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+}
 
-    Class cls = NSClassFromString(@"XPDService");
+static id SecSingletonFromClass(Class cls) {
     if (!cls) return nil;
-
-    NSArray *classSels = @[@"sharedInstance", @"shareInstance", @"defaultService", @"sharedService"];
+    NSArray *classSels = @[@"shareInstance", @"sharedInstance", @"defaultService", @"sharedService"];
     for (NSString *name in classSels) {
         SEL sel = NSSelectorFromString(name);
         if ([cls respondsToSelector:sel]) {
             id inst = ((id (*)(id, SEL))objc_msgSend)(cls, sel);
             if (inst) {
-                NSLog(@"[SecToggle] XPDService ← +%@", name);
+                NSLog(@"[SecToggle] %s ← +%@", class_getName(cls), name);
                 return inst;
             }
         }
     }
     return nil;
+}
+
+static id SecResolveDealTaskTarget(void) {
+    if (g_dealTaskTarget) return g_dealTaskTarget;
+
+    SEL dealSel = SecDealTaskSel();
+
+    __block id found = nil;
+    SecWalkWindows(^(id node) {
+        if (found) return;
+        if ([node respondsToSelector:dealSel]) {
+            found = node;
+            NSLog(@"[SecToggle] dealTask 目标(界面) ← %@", [node class]);
+        }
+    });
+    if (found) return found;
+
+    SecWalkWindows(^(id node) {
+        if (found) return;
+        for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
+            id svc = SecKVCTry(node, key);
+            if (svc && [svc respondsToSelector:dealSel]) {
+                found = svc;
+                NSLog(@"[SecToggle] dealTask 目标(%@) ← %@", key, [svc class]);
+                return;
+            }
+        }
+    });
+    if (found) return found;
+
+    Class svcCls = NSClassFromString(@"XPDService");
+    id singleton = SecSingletonFromClass(svcCls);
+    if (singleton && [singleton respondsToSelector:dealSel]) return singleton;
+
+    int num = objc_getClassList(NULL, 0);
+    if (num <= 0) return nil;
+    Class *classes = (Class *)malloc((size_t)num * sizeof(Class));
+    if (!classes) return nil;
+    objc_getClassList(classes, num);
+
+    for (int i = 0; i < num; i++) {
+        const char *cn = class_getName(classes[i]);
+        if (strncmp(cn, "XPD", 3) != 0 && strncmp(cn, "AF", 2) != 0) continue;
+        if (!class_getInstanceMethod(classes[i], dealSel)) continue;
+        if (strcmp(cn, "XPDService") == 0) {
+            id inst = SecSingletonFromClass(classes[i]);
+            if (inst) {
+                free(classes);
+                return inst;
+            }
+        }
+        SecWalkWindows(^(id node) {
+            if (found) return;
+            if ([node isKindOfClass:classes[i]] && [node respondsToSelector:dealSel]) {
+                found = node;
+                NSLog(@"[SecToggle] dealTask 目标(类扫描) ← %@", NSStringFromClass(classes[i]));
+            }
+        });
+        if (found) break;
+    }
+    free(classes);
+    return found;
 }
 
 static NSUInteger SecArgCountForSelector(SEL sel) {
@@ -425,12 +488,17 @@ static void SecWalkWindows(void (^visit)(id)) {
 
 static void SecCollectTaskIdsFromUI(void) {
     SecWalkWindows(^(id node) {
-        if (!SecIsXPDObject(node)) return;
         if (!g_taskBcdh.length) {
-            g_taskBcdh = SecStringFromKV(node, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh"]);
+            g_taskBcdh = SecStringFromKV(node, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh", @"c_bcdh"]);
         }
         if (!g_taskBcmxdh.length) {
-            g_taskBcmxdh = SecStringFromKV(node, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh"]);
+            g_taskBcmxdh = SecStringFromKV(node, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh", @"c_bcmxdh"]);
+        }
+        if (SecIsXPDObject(node)) {
+            for (NSString *key in @[@"service", @"_service"]) {
+                id svc = SecKVCTry(node, key);
+                if (svc && !g_dealTaskTarget) g_dealTaskTarget = svc;
+            }
         }
     });
 }
@@ -444,22 +512,41 @@ static BOOL SecZddmMatches(id obj, NSString *wantZddm) {
 
 static id SecFindAutoStayedTarget(void) {
     NSString *wantZddm = [[DisplayStation()[@"zddm"] description] copy];
+    SEL stayedSel = @selector(handleWhenStayedTimerFired:);
 
     for (id obj in g_stayedTargets) {
-        if ([obj respondsToSelector:@selector(handleWhenStayedTimerFired:)] &&
-            SecZddmMatches(obj, wantZddm)) {
+        if ([obj respondsToSelector:stayedSel] && SecZddmMatches(obj, wantZddm)) {
             return obj;
         }
     }
 
-    __block id found = nil;
+    __block id matched = nil;
+    __block id any = nil;
     SecWalkWindows(^(id node) {
-        if (found) return;
-        if (![node respondsToSelector:@selector(handleWhenStayedTimerFired:)]) return;
-        if (!SecZddmMatches(node, wantZddm)) return;
-        found = node;
+        if (![node respondsToSelector:stayedSel]) return;
+        if (!any) any = node;
+        if (!matched && SecZddmMatches(node, wantZddm)) matched = node;
     });
-    if (found) return found;
+    if (matched) return matched;
+    if (any) {
+        NSLog(@"[SecToggle] Stayed 目标(忽略zddm) ← %@", [any class]);
+        return any;
+    }
+
+    NSArray *hintClasses = @[@"XPDSiteV", @"XPDNewSiteV", @"XPDEdnSiteInfoV", @"XPDCurrTaskVC"];
+    for (NSString *name in hintClasses) {
+        Class cls = NSClassFromString(name);
+        if (!cls) continue;
+        __block id hint = nil;
+        SecWalkWindows(^(id node) {
+            if (hint) return;
+            if ([node isKindOfClass:cls] && [node respondsToSelector:stayedSel]) hint = node;
+        });
+        if (hint) {
+            NSLog(@"[SecToggle] Stayed 目标(%@) ← %@", name, [hint class]);
+            return hint;
+        }
+    }
 
     Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
     SEL sharedSel = @selector(sharedGeoFence);
@@ -469,7 +556,8 @@ static id SecFindAutoStayedTarget(void) {
         if (mgr && [mgr respondsToSelector:@selector(delegate)]) {
             delegate = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(delegate));
         }
-        if (delegate && [delegate respondsToSelector:@selector(handleWhenStayedTimerFired:)]) {
+        if (delegate && [delegate respondsToSelector:stayedSel]) {
+            NSLog(@"[SecToggle] Stayed 目标(AMap delegate) ← %@", [delegate class]);
             return delegate;
         }
     }
@@ -551,17 +639,18 @@ static void SecInstallStayedHooks(void) {
     free(classes);
 }
 
-static void SecTriggerAMapGeoFenceStayed(void) {
+static NSInteger SecTriggerAMapGeoFenceStayed(void) {
     Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
-    if (!mgrCls) return;
+    if (!mgrCls) return 0;
 
     SEL sharedSel = @selector(sharedGeoFence);
-    if (![mgrCls respondsToSelector:sharedSel]) return;
+    if (![mgrCls respondsToSelector:sharedSel]) return 0;
 
     id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, sharedSel);
-    if (!mgr) return;
+    if (!mgr) return 0;
 
-    SecInvokeSelectorWithArg(mgr, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
+    NSInteger n = 0;
+    n += SecInvokeSelectorWithArg(mgr, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
 
     id delegate = nil;
     if ([mgr respondsToSelector:@selector(delegate)]) {
@@ -569,11 +658,12 @@ static void SecTriggerAMapGeoFenceStayed(void) {
     }
     if (delegate) {
         if (g_stayedTargets) [g_stayedTargets addObject:delegate];
-        SecInvokeSelector(delegate, @selector(startStayedTimer));
-        SecInvokeSelectorWithArg(delegate, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
-        SecInvokeSelectorWithArg(delegate, @selector(handleWhenStayedTimerFired:), nil);
-        SecTapOpeInOnObject(delegate);
+        n += SecInvokeSelector(delegate, @selector(startStayedTimer));
+        n += SecInvokeSelectorWithArg(delegate, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
+        n += SecInvokeSelectorWithArg(delegate, @selector(handleWhenStayedTimerFired:), nil);
     }
+    if (n > 0) NSLog(@"[SecToggle] AMap Stayed 链触发 n=%ld", (long)n);
+    return n > 0 ? 1 : 0;
 }
 
 static NSInteger SecDirectDealTask(void) {
@@ -602,8 +692,13 @@ static NSInteger SecDirectDealTask(void) {
         });
     };
 
-    SEL fullSel = @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+    SEL fullSel = SecDealTaskSel();
     SEL shortSel = @selector(bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+
+    if (!bcdh.length || !bcmxdh.length) {
+        NSLog(@"[SecToggle] 警告: bcdh=%@ bcmxdh=%@ (任务单号缺失可能导致 dealTask 无效)",
+              bcdh, bcmxdh);
+    }
 
     @try {
 #pragma clang diagnostic push
@@ -665,8 +760,10 @@ static void SecSimulateAutoArrive(void) {
 
     SecInstallDealTaskHooks();
     SecInstallStayedHooks();
+    SecInstallTapOpeInHooks();
     SecCollectTaskIdsFromUI();
 
+    id dealTarget = SecResolveDealTaskTarget();
     g_simulatingAuto = YES;
     g_forceAutoCzlx = YES;
 
@@ -674,11 +771,17 @@ static void SecSimulateAutoArrive(void) {
     if (n == 0) {
         n = SecTriggerAutoStayedOnce();
     }
+    if (n == 0) {
+        n = SecTriggerAMapGeoFenceStayed();
+    }
 
     if (n == 0) {
         SecClearSimFlags();
-        SecShowSimResult(@"未找到自动入口，请开关ON等待围栏或手动点到达");
-        NSLog(@"[SecToggle] 无 Stayed 目标 zddm=%@", t[@"zddm"]);
+        NSString *why = @"自动链路未触发";
+        if (!dealTarget) why = @"未找到 dealTask 对象";
+        else if (!g_taskBcmxdh.length) why = @"缺少 bcmxdh，请刷新任务页";
+        SecShowSimResult([NSString stringWithFormat:@"%@，可开关ON等围栏", why]);
+        NSLog(@"[SecToggle] 模拟失败 bcdh=%@ bcmxdh=%@ zddm=%@", g_taskBcdh, g_taskBcmxdh, t[@"zddm"]);
     } else {
         SecScheduleClearSimFlags();
         if (g_lastDealType.length) {
@@ -734,7 +837,7 @@ static void SecInstallDealTaskHooks(void) {
     static BOOL installed = NO;
     if (installed) return;
 
-    SEL sel = @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+    SEL sel = SecDealTaskSel();
     int num = objc_getClassList(NULL, 0);
     if (num <= 0) return;
 
