@@ -9,21 +9,12 @@
 #import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <math.h>
 
 void SecUpdateStatusLabel(void);
 static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
 static void SecInstallTapOpeInHooks(void);
 static void SecShowSimResult(NSString *msg);
-static void SecPanelLog(NSString *format, ...);
-static void SecSimulateAutoArriveImpl(void);
-static NSString *SecStationTitle(NSDictionary *t);
-static NSString *SecShortURL(NSString *url);
-static void SecRefreshFakeLocation(void);
-static void SecStartGpsPulse(void);
-static void SecStopGpsPulse(void);
-static SEL SecDealTaskSel(void);
 
 @interface SecToggleHandler : NSObject
 + (instancetype)shared;
@@ -40,11 +31,6 @@ static NSMutableArray *g_stations = nil;
 static NSInteger g_stationIndex = 0;
 static UIView *g_panel = nil;
 static UILabel *g_statusLabel = nil;
-static UILabel *g_logLabel = nil;
-static NSMutableArray<NSString *> *g_logLines = nil;
-static const NSUInteger kSecMaxLogLines = 10;
-static const NSInteger kSecMaxWalkNodes = 2500;
-static NSInteger g_walkNodeCount = 0;
 static NSString *g_lastDealType = nil;
 static NSString *g_lastDealClass = nil;
 static id g_dealTaskTarget = nil;
@@ -54,14 +40,7 @@ static NSString *g_taskBcmxdh = nil;
 static BOOL g_simulatingAuto = NO;
 static BOOL g_inAutoStayedChain = NO;
 static BOOL g_forceAutoCzlx = NO;
-static BOOL g_simInFlight = NO;
 static NSTimeInterval g_lastSimTime = 0;
-static NSTimeInterval g_lastSimDealTime = 0;
-static NSString *g_lastSimDealZddm = nil;
-static dispatch_block_t g_simTimeoutBlock = nil;
-static CLLocation *g_fakeLocation = nil;
-static NSTimer *g_gpsPulseTimer = nil;
-static NSInteger g_gpsPulseIndex = 0;
 
 static BOOL SecIsManualDealType(id dealType) {
     if (!dealType || dealType == (id)kCFNull) return NO;
@@ -85,75 +64,12 @@ static void SecClearSimFlags(void) {
     g_simulatingAuto = NO;
     g_inAutoStayedChain = NO;
     g_forceAutoCzlx = NO;
-    g_simInFlight = NO;
 }
 
-static void SecCancelSimTimeout(void) {
-    if (g_simTimeoutBlock) {
-        dispatch_block_cancel(g_simTimeoutBlock);
-        g_simTimeoutBlock = NULL;
-    }
-}
-
-static void SecBeginSimWindow(void) {
-    SecCancelSimTimeout();
-    g_simulatingAuto = YES;
-    g_forceAutoCzlx = YES;
-    g_simInFlight = YES;
-    g_lastSimDealTime = 0;
-    g_lastSimDealZddm = nil;
-
-    g_simTimeoutBlock = dispatch_block_create(0, ^{
-        if (g_simInFlight) {
-            SecPanelLog(@"模拟窗口超时(30s)");
-            SecClearSimFlags();
-        }
+static void SecScheduleClearSimFlags(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        SecClearSimFlags();
     });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), g_simTimeoutBlock);
-}
-
-static void SecEndSimWindow(void) {
-    SecCancelSimTimeout();
-    SecClearSimFlags();
-}
-
-static BOOL SecIsSimActive(void) {
-    return g_simulatingAuto || g_forceAutoCzlx || g_inAutoStayedChain;
-}
-
-static BOOL SecShouldSkipDuplicateSimDeal(id zddm) {
-    if (!SecIsSimActive()) return NO;
-    NSString *z = [zddm description];
-    if (!z.length) return NO;
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    if (g_lastSimDealZddm.length &&
-        [g_lastSimDealZddm isEqualToString:z] &&
-        (now - g_lastSimDealTime) < 4.0) {
-        return YES;
-    }
-    g_lastSimDealZddm = z;
-    g_lastSimDealTime = now;
-    return NO;
-}
-
-static id SecWrapSimCompletion(id completion) {
-    void (^origCb)(id, NSError *) = completion;
-    return ^(id resp, NSError *err) {
-        if (err) {
-            SecPanelLog(@"dealTask 失败 %@", err.localizedDescription);
-        } else {
-            SecPanelLog(@"dealTask 完成");
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (g_simInFlight) {
-                SecEndSimWindow();
-                SecShowSimResult(err ? [NSString stringWithFormat:@"dealTask 失败: %@", err.localizedDescription] :
-                                   @"dealTask 已完成");
-            }
-        });
-        if (origCb) origCb(resp, err);
-    };
 }
 static NSHashTable *g_stayedTargets = nil;
 static NSHashTable *g_siteTargets = nil;
@@ -191,14 +107,13 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
     double lon = ParseDouble(jd);
     double lat = ParseDouble(wd);
     NSString *zddm = [dict[@"c_zddm"] ?: dict[@"zddm"] ?: @"" description];
-    if ([zddm isEqualToString:@"(null)"] || [zddm isEqualToString:@"<null>"]) zddm = @"";
     id nameRaw = dict[@"c_zdmc"] ?: dict[@"c_zdjmc"] ?: dict[@"c_zdwz"] ?: dict[@"name"];
     NSString *name = [nameRaw description];
     if ([name isEqualToString:@"(null)"] || [name isEqualToString:@"<null>"]) name = @"";
+    if ([zddm isEqualToString:@"(null)"] || [zddm isEqualToString:@"<null>"]) zddm = @"";
 
     if (zddm.length && !isnan(lon) && !isnan(lat) && (lon != 0 || lat != 0)) {
         NSInteger queue = (NSInteger)ParseDouble(dict[@"n_queue"]);
-        double zdbj = ParseDouble(dict[@"n_zdbj"]);
         NSString *key = [NSString stringWithFormat:@"%@@%f,%f", zddm, lon, lat];
         BOOL exists = NO;
         for (NSMutableDictionary *s in g_stations) {
@@ -206,20 +121,14 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
                 exists = YES;
                 if (name.length) s[@"name"] = name;
                 if (queue > 0) s[@"queue"] = @(queue);
-                if (zdbj > 0) s[@"zdbj"] = @(zdbj);
                 s[@"jd"] = @(lon);
                 s[@"wd"] = @(lat);
                 break;
             }
         }
         if (!exists) {
-            NSMutableDictionary *entry = [@{@"key":key, @"zddm":zddm, @"name":name,
-                                            @"jd":@(lon), @"wd":@(lat), @"queue":@(queue),
-                                            @"zdbj":@(zdbj > 0 ? zdbj : 35)} mutableCopy];
-            [g_stations addObject:entry];
-            if (g_stations.count <= 12) {
-                SecPanelLog(@"解析站点 %@", SecStationTitle(entry));
-            }
+            [g_stations addObject:[@{@"key":key, @"zddm":zddm, @"name":name,
+                                     @"jd":@(lon), @"wd":@(lat), @"queue":@(queue)} mutableCopy]];
             [g_stations sortUsingComparator:^NSComparisonResult(id a, id b) {
                 NSInteger qa = [a[@"queue"] integerValue];
                 NSInteger qb = [b[@"queue"] integerValue];
@@ -266,40 +175,14 @@ static NSDictionary *CurrentTarget(void) {
     return SpoofTarget();
 }
 
-static BOOL SecShouldJitterGps(void) {
-    return g_enabled || g_simulatingAuto;
+static void RefreshTarget(void) {
+    SecUpdateStatusLabel();
 }
 
-static void SecSpoofedCoords(NSDictionary *t, double *outLat, double *outLon, BOOL jitter) {
-    double baseLat = [t[@"wd"] doubleValue];
-    double baseLon = [t[@"jd"] doubleValue];
-    if (!jitter) {
-        *outLat = baseLat;
-        *outLon = baseLon;
-        return;
-    }
-
-    double radiusM = [t[@"zdbj"] doubleValue];
-    if (radiusM <= 0 || radiusM > 800) radiusM = 35.0;
-    double maxM = radiusM * 0.4;
-    if (maxM < 10) maxM = 10;
-    if (maxM > 50) maxM = 50;
-
-    NSInteger i = g_gpsPulseIndex;
-    double angle = fmod(i * 0.9, 2.0 * M_PI);
-    double dist = maxM * (0.2 + 0.8 * ((i % 6) / 6.0));
-    double cosLat = cos(baseLat * M_PI / 180.0);
-    if (fabs(cosLat) < 0.01) cosLat = 0.01;
-
-    *outLat = baseLat + (dist * cos(angle)) / 111320.0;
-    *outLon = baseLon + (dist * sin(angle)) / (111320.0 * cosLat);
-}
-
-static NSString *SecPatchCoordField(NSString *raw, NSString *key, double value) {
-    NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9.eE+-]+\"?", key];
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
-    NSString *rep = [NSString stringWithFormat:@"\"%@\":%f", key, value];
-    return [re stringByReplacingMatchesInString:raw options:0 range:NSMakeRange(0, raw.length) withTemplate:rep];
+static void NextStation(void) {
+    if (g_stations.count == 0) return;
+    g_stationIndex = (g_stationIndex + 1) % g_stations.count;
+    RefreshTarget();
 }
 
 static NSString *SecPatchStringField(NSString *raw, NSString *key, NSString *value) {
@@ -310,48 +193,34 @@ static NSString *SecPatchStringField(NSString *raw, NSString *key, NSString *val
     return [re stringByReplacingMatchesInString:raw options:0 range:NSMakeRange(0, raw.length) withTemplate:rep];
 }
 
-static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
+static NSString *PatchJson(NSString *raw) {
     NSDictionary *t = CurrentTarget();
     if (!t) return raw;
-
     double jd = [t[@"jd"] doubleValue];
     double wd = [t[@"wd"] doubleValue];
-    BOOL isCar = [url containsString:@"car/"];
-    if (isCar && SecShouldJitterGps()) {
-        SecSpoofedCoords(t, &wd, &jd, YES);
-    }
     NSString *zddm = [t[@"zddm"] description];
+    NSArray *keys = @[@"n_jd",@"n_wd",@"n_zdjd",@"n_zdwd",
+                      @"gpslongitude",@"gpslatitude",@"longitude",@"latitude",@"lng",@"lat"];
     NSString *out = raw;
-
-    BOOL isArrive = [url containsString:@"rwcz"] &&
-        ([url containsString:@"zddd"] || [url containsString:@"zdqd"] ||
-         [url containsString:@"zdlk"] || [url containsString:@"/qd"]);
-
-    if (isArrive) {
-        NSArray *allKeys = @[@"n_jd", @"n_wd", @"n_zdjd", @"n_zdwd",
-                             @"gpslongitude", @"gpslatitude", @"longitude", @"latitude", @"lng", @"lat"];
-        for (NSString *key in allKeys) {
-            BOOL isLat = [key isEqualToString:@"n_wd"] || [key isEqualToString:@"n_zdwd"] ||
-                         [key isEqualToString:@"lat"] || [key isEqualToString:@"latitude"] ||
-                         [key isEqualToString:@"gpslatitude"];
-            out = SecPatchCoordField(out, key, isLat ? wd : jd);
+    for (NSString *key in keys) {
+        NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9.eE+-]+\"?", key];
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
+        NSString *rep;
+        if ([key isEqualToString:@"n_wd"] || [key isEqualToString:@"n_zdwd"] ||
+            [key isEqualToString:@"lat"] || [key isEqualToString:@"latitude"] || [key isEqualToString:@"gpslatitude"]) {
+            rep = [NSString stringWithFormat:@"\"%@\":%f", key, wd];
+        } else {
+            rep = [NSString stringWithFormat:@"\"%@\":%f", key, jd];
         }
-        out = SecPatchStringField(out, @"c_zddm", zddm);
-        out = SecPatchStringField(out, @"zddm", zddm);
-        SecPanelLog(@"到达改包 %@", SecStationTitle(t));
-    } else {
-        NSArray *gpsKeys = @[@"n_jd", @"n_wd", @"gpslongitude", @"gpslatitude",
-                             @"longitude", @"latitude", @"lng", @"lat"];
-        for (NSString *key in gpsKeys) {
-            BOOL isLat = [key isEqualToString:@"n_wd"] || [key isEqualToString:@"lat"] ||
-                         [key isEqualToString:@"latitude"] || [key isEqualToString:@"gpslatitude"];
-            out = SecPatchCoordField(out, key, isLat ? wd : jd);
-        }
+        out = [re stringByReplacingMatchesInString:out options:0 range:NSMakeRange(0, out.length) withTemplate:rep];
     }
+    out = SecPatchStringField(out, @"c_zddm", zddm);
+    out = SecPatchStringField(out, @"zddm", zddm);
 
-    if (SecIsSimActive()) {
+    if (g_simulatingAuto || g_forceAutoCzlx) {
         NSString *autoCzlx = [SecAutoDealType() description];
-        for (NSString *key in @[@"n_czlx", @"c_czlx", @"czlx"]) {
+        NSArray *czKeys = @[@"n_czlx", @"c_czlx", @"czlx"];
+        for (NSString *key in czKeys) {
             NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9]+\"?", key];
             NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
             NSString *rep = [NSString stringWithFormat:@"\"%@\":%@", key, autoCzlx];
@@ -359,103 +228,6 @@ static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
         }
     }
     return out;
-}
-
-static NSString *PatchJson(NSString *raw) {
-    return PatchJsonForRequest(raw, @"");
-}
-
-static void RefreshTarget(void) {
-    SecUpdateStatusLabel();
-}
-
-static void SecPanelLog(NSString *format, ...) {
-    if (!format) return;
-    va_list args;
-    va_start(args, format);
-    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    NSLog(@"[SecToggle] %@", msg);
-
-    if (!g_logLines) g_logLines = [NSMutableArray array];
-    static NSDateFormatter *df;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        df = [[NSDateFormatter alloc] init];
-        df.dateFormat = @"HH:mm:ss";
-    });
-    NSString *line = [NSString stringWithFormat:@"%@ %@", [df stringFromDate:[NSDate date]], msg];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [g_logLines addObject:line];
-        while (g_logLines.count > kSecMaxLogLines) {
-            [g_logLines removeObjectAtIndex:0];
-        }
-        if (g_logLabel) {
-            g_logLabel.text = [g_logLines componentsJoinedByString:@"\n"];
-        }
-    });
-}
-
-static NSString *SecShortURL(NSString *url) {
-    if (!url.length) return @"";
-    NSRange r = [url rangeOfString:@"/app/sjb/v1"];
-    if (r.location != NSNotFound) return [url substringFromIndex:r.location];
-    if (url.length > 42) return [[url substringToIndex:39] stringByAppendingString:@"..."];
-    return url;
-}
-
-static void NextStation(void) {
-    if (g_stations.count == 0) return;
-    g_stationIndex = (g_stationIndex + 1) % g_stations.count;
-    SecRefreshFakeLocation();
-    RefreshTarget();
-    NSDictionary *t = DisplayStation();
-    if (t) SecPanelLog(@"切换 → %@", SecStationTitle(t));
-}
-
-static void SecRefreshFakeLocation(void) {
-    g_gpsPulseIndex++;
-}
-
-static CLLocation *SecFakeLocation(void) {
-    NSDictionary *t = SpoofTarget();
-    if (!t) return nil;
-    double lat, lon;
-    SecSpoofedCoords(t, &lat, &lon, SecShouldJitterGps());
-    return [[CLLocation alloc] initWithLatitude:lat longitude:lon];
-}
-
-static void SecGpsPulseTick(NSTimer *timer) {
-    (void)timer;
-    if (!g_enabled) return;
-    SecRefreshFakeLocation();
-    NSDictionary *t = DisplayStation();
-    if (!t) return;
-    double lat, lon;
-    SecSpoofedCoords(t, &lat, &lon, YES);
-    double baseLat = [t[@"wd"] doubleValue];
-    double baseLon = [t[@"jd"] doubleValue];
-    double cosLat = cos(baseLat * M_PI / 180.0);
-    if (fabs(cosLat) < 0.01) cosLat = 0.01;
-    double dLatM = (lat - baseLat) * 111320.0;
-    double dLonM = (lon - baseLon) * 111320.0 * cosLat;
-    double distM = sqrt(dLatM * dLatM + dLonM * dLonM);
-    SecPanelLog(@"GPS漂移 %@ ~%.0fm", SecStationTitle(t), distM);
-}
-
-static void SecStartGpsPulse(void) {
-    SecStopGpsPulse();
-    g_gpsPulseTimer = [NSTimer scheduledTimerWithTimeInterval:8.0
-                                                      repeats:YES
-                                                        block:^(NSTimer *t) {
-        SecGpsPulseTick(t);
-    }];
-    SecGpsPulseTick(nil);
-}
-
-static void SecStopGpsPulse(void) {
-    [g_gpsPulseTimer invalidate];
-    g_gpsPulseTimer = nil;
 }
 
 #pragma mark - 方案 B：模拟自动到达
@@ -472,19 +244,19 @@ static BOOL SecClassMatches(id obj) {
     return [cn hasPrefix:@"AMap"] || [cn containsString:@"GeoFence"];
 }
 
-static SEL SecDealTaskSel(void) {
-    return @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
-}
+static id SecResolveDealTaskTarget(void) {
+    if (g_dealTaskTarget) return g_dealTaskTarget;
 
-static id SecSingletonFromClass(Class cls) {
+    Class cls = NSClassFromString(@"XPDService");
     if (!cls) return nil;
-    NSArray *classSels = @[@"shareInstance", @"sharedInstance", @"defaultService", @"sharedService"];
+
+    NSArray *classSels = @[@"sharedInstance", @"shareInstance", @"defaultService", @"sharedService"];
     for (NSString *name in classSels) {
         SEL sel = NSSelectorFromString(name);
         if ([cls respondsToSelector:sel]) {
             id inst = ((id (*)(id, SEL))objc_msgSend)(cls, sel);
             if (inst) {
-                SecPanelLog(@"%s ← +%@", class_getName(cls), name);
+                NSLog(@"[SecToggle] XPDService ← +%@", name);
                 return inst;
             }
         }
@@ -494,7 +266,7 @@ static id SecSingletonFromClass(Class cls) {
 
 static NSUInteger SecArgCountForSelector(SEL sel) {
     if (!sel) return 0;
-    return strchr(sel_getName(sel), ':') != NULL;
+    return (NSUInteger)strchr(sel_getName(sel), ':') != NULL;
 }
 
 static id SecKVCTry(id obj, NSString *key) {
@@ -539,13 +311,13 @@ static NSInteger SecInvokeSelectorWithArg(id obj, SEL sel, id arg) {
             ((void (*)(id, SEL, id))objc_msgSend)(obj, sel, arg ?: nil);
         }
 #pragma clang diagnostic pop
-        SecPanelLog(@"已触发 %@", NSStringFromSelector(sel));
+        NSLog(@"[SecToggle] 已触发 %@ ← %@", NSStringFromSelector(sel), [obj class]);
         if (g_siteTargets && SecClassMatches(obj)) {
             [g_siteTargets addObject:obj];
         }
         return 1;
     } @catch (NSException *e) {
-        SecPanelLog(@"触发 %@ 失败: %@", NSStringFromSelector(sel), e);
+        NSLog(@"[SecToggle] 触发 %@ 失败: %@", NSStringFromSelector(sel), e);
         return 0;
     }
 }
@@ -565,7 +337,7 @@ static NSInteger SecTapOpeInOnObject(id obj) {
         id v = SecKVCTry(obj, key);
         if ([v isKindOfClass:[UIControl class]]) {
             [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
-            SecPanelLog(@"点击 %@ ← %@", key, [obj class]);
+            NSLog(@"[SecToggle] 点击 %@ ← %@", key, [obj class]);
             return 1;
         }
     }
@@ -578,7 +350,6 @@ static NSInteger SecTapOpeInOnObject(id obj) {
 
 static void SecWalkCollect(id node, void (^visit)(id), NSMutableSet *seen) {
     if (!node || !visit) return;
-    if (g_walkNodeCount++ > kSecMaxWalkNodes) return;
     NSValue *key = [NSValue valueWithNonretainedObject:node];
     if ([seen containsObject:key]) return;
     [seen addObject:key];
@@ -589,6 +360,7 @@ static void SecWalkCollect(id node, void (^visit)(id), NSMutableSet *seen) {
             SecWalkCollect(sub, visit, seen);
         }
     }
+    SecWalkCollect([node nextResponder], visit, seen);
 }
 
 static void SecWalkViewControllerTree(id node, void (^visit)(id), NSMutableSet *seen) {
@@ -621,7 +393,6 @@ static void SecWalkViewControllerTree(id node, void (^visit)(id), NSMutableSet *
 
 static void SecWalkWindows(void (^visit)(id)) {
     if (!visit) return;
-    g_walkNodeCount = 0;
     NSMutableSet *seen = [NSMutableSet set];
     SecForEachWindow(^(UIWindow *win) {
         SecWalkCollect(win, visit, seen);
@@ -629,113 +400,14 @@ static void SecWalkWindows(void (^visit)(id)) {
     });
 }
 
-static UIViewController *SecTopViewController(UIViewController *vc) {
-    if (!vc) return nil;
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        return SecTopViewController([(UINavigationController *)vc visibleViewController]);
-    }
-    if ([vc isKindOfClass:[UITabBarController class]]) {
-        return SecTopViewController([(UITabBarController *)vc selectedViewController]);
-    }
-    if (vc.presentedViewController) {
-        return SecTopViewController(vc.presentedViewController);
-    }
-    return vc;
-}
-
-static id SecServiceFromViewController(UIViewController *vc, SEL dealSel, BOOL logHit) {
-    if (!vc) return nil;
-    NSString *cn = NSStringFromClass([vc class]);
-    if (![cn hasPrefix:@"XPD"]) return nil;
-    for (NSString *key in @[@"service", @"_service", @"xpdService", @"_xpdService"]) {
-        id svc = SecKVCTry(vc, key);
-        if (svc && [svc respondsToSelector:dealSel]) {
-            if (logHit) SecPanelLog(@"service ← %@.%@", cn, key);
-            return svc;
-        }
-    }
-    if ([vc respondsToSelector:dealSel]) {
-        if (logHit) SecPanelLog(@"dealTask ← %@", cn);
-        return vc;
-    }
-    return nil;
-}
-
-static id SecFindServiceFromTaskPages(void) {
-    SEL dealSel = SecDealTaskSel();
-    __block id found = nil;
-    SecForEachWindow(^(UIWindow *win) {
-        if (found) return;
-        UIViewController *top = SecTopViewController(win.rootViewController);
-        for (UIViewController *vc = top; vc && !found; vc = vc.parentViewController) {
-            found = SecServiceFromViewController(vc, dealSel, YES);
-        }
-    });
-    if (found) g_dealTaskTarget = found;
-    return found;
-}
-
-static id SecFastDealTaskTarget(void) {
-    if (g_dealTaskTarget) return g_dealTaskTarget;
-    id svc = SecFindServiceFromTaskPages();
-    if (svc) return svc;
-    Class cls = NSClassFromString(@"XPDService");
-    id inst = SecSingletonFromClass(cls);
-    if (inst) g_dealTaskTarget = inst;
-    return inst;
-}
-
-static id SecResolveDealTaskTarget(void) {
-    id fast = SecFastDealTaskTarget();
-    if (fast) return fast;
-
-    SEL dealSel = SecDealTaskSel();
-    __block id found = nil;
-    SecWalkWindows(^(id node) {
-        if (found) return;
-        if ([node respondsToSelector:dealSel]) {
-            found = node;
-            return;
-        }
-        for (NSString *key in @[@"service", @"_service"]) {
-            id svc = SecKVCTry(node, key);
-            if (svc && [svc respondsToSelector:dealSel]) {
-                found = svc;
-                return;
-            }
-        }
-    });
-    if (found) {
-        g_dealTaskTarget = found;
-        SecPanelLog(@"dealTask ← %@", [found class]);
-    }
-    return found;
-}
-
-static void SecCollectTaskIdsFromObject(id obj) {
-    if (!obj) return;
-    if (!g_taskBcdh.length) {
-        g_taskBcdh = SecStringFromKV(obj, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh", @"c_bcdh"]);
-    }
-    if (!g_taskBcmxdh.length) {
-        g_taskBcmxdh = SecStringFromKV(obj, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh", @"c_bcmxdh"]);
-    }
-}
-
 static void SecCollectTaskIdsFromUI(void) {
-    if (g_dealTaskTarget) {
-        SecCollectTaskIdsFromObject(g_dealTaskTarget);
-    }
-    SecForEachWindow(^(UIWindow *win) {
-        if (g_taskBcdh.length && g_taskBcmxdh.length && g_dealTaskTarget) return;
-        UIViewController *top = SecTopViewController(win.rootViewController);
-        for (UIViewController *vc = top; vc; vc = vc.parentViewController) {
-            SecCollectTaskIdsFromObject(vc);
-            if (!g_dealTaskTarget && SecIsXPDObject(vc)) {
-                id svc = SecKVCTry(vc, @"service") ?: SecKVCTry(vc, @"_service");
-                if (svc) g_dealTaskTarget = svc;
-            }
-            if (g_taskBcdh.length && g_taskBcmxdh.length && g_dealTaskTarget) break;
+    SecWalkWindows(^(id node) {
+        if (!SecIsXPDObject(node)) return;
+        if (!g_taskBcdh.length) {
+            g_taskBcdh = SecStringFromKV(node, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh"]);
+        }
+        if (!g_taskBcmxdh.length) {
+            g_taskBcmxdh = SecStringFromKV(node, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh"]);
         }
     });
 }
@@ -749,30 +421,20 @@ static BOOL SecZddmMatches(id obj, NSString *wantZddm) {
 
 static id SecFindAutoStayedTarget(void) {
     NSString *wantZddm = [[DisplayStation()[@"zddm"] description] copy];
-    SEL stayedSel = @selector(handleWhenStayedTimerFired:);
 
     for (id obj in g_stayedTargets) {
-        if ([obj respondsToSelector:stayedSel] && SecZddmMatches(obj, wantZddm)) {
+        if ([obj respondsToSelector:@selector(handleWhenStayedTimerFired:)] &&
+            SecZddmMatches(obj, wantZddm)) {
             return obj;
         }
     }
 
     __block id found = nil;
-    SecForEachWindow(^(UIWindow *win) {
+    SecWalkWindows(^(id node) {
         if (found) return;
-        for (UIViewController *vc = SecTopViewController(win.rootViewController); vc; vc = vc.parentViewController) {
-            if ([vc respondsToSelector:stayedSel] && SecZddmMatches(vc, wantZddm)) {
-                found = vc;
-                return;
-            }
-            for (NSString *key in @[@"service", @"_service"]) {
-                id svc = SecKVCTry(vc, key);
-                if (svc && [svc respondsToSelector:stayedSel] && SecZddmMatches(svc, wantZddm)) {
-                    found = svc;
-                    return;
-                }
-            }
-        }
+        if (![node respondsToSelector:@selector(handleWhenStayedTimerFired:)]) return;
+        if (!SecZddmMatches(node, wantZddm)) return;
+        found = node;
     });
     if (found) return found;
 
@@ -784,22 +446,11 @@ static id SecFindAutoStayedTarget(void) {
         if (mgr && [mgr respondsToSelector:@selector(delegate)]) {
             delegate = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(delegate));
         }
-        if (delegate && [delegate respondsToSelector:stayedSel]) {
+        if (delegate && [delegate respondsToSelector:@selector(handleWhenStayedTimerFired:)]) {
             return delegate;
         }
     }
-
-    __block id matched = nil;
-    __block id any = nil;
-    g_walkNodeCount = 0;
-    SecWalkWindows(^(id node) {
-        if (g_walkNodeCount > 800) return;
-        if (![node respondsToSelector:stayedSel]) return;
-        if (!any) any = node;
-        if (!matched && SecZddmMatches(node, wantZddm)) matched = node;
-    });
-    if (matched) return matched;
-    return any;
+    return nil;
 }
 
 static NSInteger SecTriggerAutoStayedOnce(void) {
@@ -812,7 +463,7 @@ static NSInteger SecTriggerAutoStayedOnce(void) {
 
     if (n > 0) {
         if (g_stayedTargets) [g_stayedTargets addObject:target];
-        SecPanelLog(@"自动到达(Stayed×1) ← %@", [target class]);
+        NSLog(@"[SecToggle] 自动到达(Stayed×1) ← %@", [target class]);
     }
     return n > 0 ? 1 : 0;
 }
@@ -828,10 +479,6 @@ static void hook_stayedFired(id self, SEL _cmd, id timer) {
 
 static void hook_tapOpeIn(id self, SEL _cmd, id sender) {
     if (g_siteTargets && SecClassMatches(self)) [g_siteTargets addObject:self];
-    if (g_simulatingAuto || g_forceAutoCzlx) {
-        SecPanelLog(@"拦截手动 tapOpeIn ← %@", [self class]);
-        return;
-    }
     orig_tapOpeIn(self, _cmd, sender);
 }
 
@@ -851,7 +498,7 @@ static void SecInstallTapOpeInHooks(void) {
         if (!m) continue;
         orig_tapOpeIn = (void (*)(id, SEL, id))method_getImplementation(m);
         method_setImplementation(m, (IMP)hook_tapOpeIn);
-        SecPanelLog(@"Hook tapOpeIn ← %@", NSStringFromClass(classes[i]));
+        NSLog(@"[SecToggle] Hook tapOpeIn ← %@", NSStringFromClass(classes[i]));
         installed = YES;
         break;
     }
@@ -874,28 +521,46 @@ static void SecInstallStayedHooks(void) {
         if (!m) continue;
         orig_stayedFired = (void (*)(id, SEL, id))method_getImplementation(m);
         method_setImplementation(m, (IMP)hook_stayedFired);
-        SecPanelLog(@"Hook handleWhenStayedTimerFired ← %@", NSStringFromClass(classes[i]));
+        NSLog(@"[SecToggle] Hook handleWhenStayedTimerFired ← %@", NSStringFromClass(classes[i]));
         installed = YES;
         break;
     }
     free(classes);
 }
 
-static NSInteger SecTriggerAMapGeoFenceStayed(void) {
-    id target = SecFindAutoStayedTarget();
-    if (!target) return 0;
-    g_inAutoStayedChain = YES;
-    NSInteger n = SecInvokeSelectorWithArg(target, @selector(handleWhenStayedTimerFired:), nil);
-    g_inAutoStayedChain = NO;
-    if (n > 0) SecPanelLog(@"Stayed ← %@", [target class]);
-    return n > 0 ? 1 : 0;
+static void SecTriggerAMapGeoFenceStayed(void) {
+    Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
+    if (!mgrCls) return;
+
+    SEL sharedSel = @selector(sharedGeoFence);
+    if (![mgrCls respondsToSelector:sharedSel]) return;
+
+    id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, sharedSel);
+    if (!mgr) return;
+
+    SecInvokeSelectorWithArg(mgr, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
+
+    id delegate = nil;
+    if ([mgr respondsToSelector:@selector(delegate)]) {
+        delegate = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(delegate));
+    }
+    if (delegate) {
+        if (g_stayedTargets) [g_stayedTargets addObject:delegate];
+        SecInvokeSelector(delegate, @selector(startStayedTimer));
+        SecInvokeSelectorWithArg(delegate, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
+        SecInvokeSelectorWithArg(delegate, @selector(handleWhenStayedTimerFired:), nil);
+        SecTapOpeInOnObject(delegate);
+    }
 }
 
-static NSInteger SecDirectDealTaskOn(id target) {
+static NSInteger SecDirectDealTask(void) {
+    id target = SecResolveDealTaskTarget();
     if (!target) return 0;
 
     NSDictionary *t = DisplayStation();
     if (!t) return 0;
+
+    SecCollectTaskIdsFromUI();
 
     NSString *bcdh = g_taskBcdh;
     NSString *bcmxdh = g_taskBcmxdh;
@@ -905,12 +570,17 @@ static NSInteger SecDirectDealTaskOn(id target) {
     NSNumber *fjsj = @((NSInteger)([[NSDate date] timeIntervalSince1970] * 1000));
     id dealType = SecAutoDealType();
 
-    SEL fullSel = SecDealTaskSel();
-    SEL shortSel = @selector(bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+    void (^completion)(id, NSError *) = ^(id resp, NSError *err) {
+        NSLog(@"[SecToggle] dealTask 回调 err=%@ resp=%@", err, resp);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *tip = err ? [NSString stringWithFormat:@"dealTask 失败: %@", err.localizedDescription] :
+                @"dealTask 已请求";
+            SecShowSimResult(tip);
+        });
+    };
 
-    if (!bcdh.length || !bcmxdh.length) {
-        SecPanelLog(@"缺 bcdh/bcmxdh: %@ / %@", bcdh, bcmxdh);
-    }
+    SEL fullSel = @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+    SEL shortSel = @selector(bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
 
     @try {
 #pragma clang diagnostic push
@@ -918,30 +588,27 @@ static NSInteger SecDirectDealTaskOn(id target) {
         if ([target respondsToSelector:fullSel]) {
             ((void (*)(id, SEL, id, id, id, id, id, id, id, id))objc_msgSend)(
                 target, fullSel,
-                bcdh ?: @"", bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, nil);
-            SecPanelLog(@"dealTask 已调用 zddm=%@ type=%@", zddm, dealType);
+                bcdh ?: @"", bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, completion);
+            NSLog(@"[SecToggle] 直接 dealTask bcdh=%@ bcmxdh=%@ zddm=%@ dealType=%@",
+                  bcdh, bcmxdh, zddm, dealType);
             return 1;
         }
         if ([target respondsToSelector:shortSel]) {
             ((void (*)(id, SEL, id, id, id, id, id, id, id))objc_msgSend)(
                 target, shortSel,
-                bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, nil);
-            SecPanelLog(@"dealTask(短) zddm=%@ type=%@", zddm, dealType);
+                bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, completion);
+            NSLog(@"[SecToggle] 直接 bcmxdh dealTask bcmxdh=%@ zddm=%@ dealType=%@",
+                  bcmxdh, zddm, dealType);
             return 1;
         }
 #pragma clang diagnostic pop
     } @catch (NSException *e) {
-        SecPanelLog(@"dealTask 异常: %@", e);
+        NSLog(@"[SecToggle] 直接 dealTask 异常: %@", e);
     }
     return 0;
 }
 
-static NSInteger SecDirectDealTask(void) {
-    return SecDirectDealTaskOn(SecFastDealTaskTarget());
-}
-
 static void SecShowSimResult(NSString *msg) {
-    if (msg.length) SecPanelLog(@"%@", msg);
     if (!g_statusLabel) return;
     NSDictionary *t = DisplayStation();
     NSString *title = SecStationTitle(t);
@@ -951,53 +618,14 @@ static void SecShowSimResult(NSString *msg) {
                           title, msg];
 }
 
-static void SecSimulateAutoArriveImpl(void) {
-    if (g_simInFlight) return;
-
-    if (!g_taskBcmxdh.length || !g_dealTaskTarget) {
-        SecCollectTaskIdsFromUI();
-    }
-    if (!g_taskBcmxdh.length) {
-        SecShowSimResult(@"缺少 bcmxdh，请刷新任务页");
-        return;
-    }
-
-    SecInstallDealTaskHooks();
-    SecInstallStayedHooks();
-    SecInstallTapOpeInHooks();
-    SecBeginSimWindow();
-    SecShowSimResult(@"模拟中…");
-
-    NSInteger n = SecTriggerAutoStayedOnce();
-    if (n == 0) {
-        id target = g_dealTaskTarget ?: SecFindServiceFromTaskPages();
-        if (target) {
-            n = SecDirectDealTaskOn(target);
-        }
-    }
-
-    if (n == 0) {
-        SecEndSimWindow();
-        SecShowSimResult(@"未找到自动入口，请留任务页等围栏");
-        SecPanelLog(@"无 Stayed/service zddm=%@", DisplayStation()[@"zddm"]);
-        return;
-    }
-
-    NSString *typeHint = g_lastDealType.length ? g_lastDealType : [SecAutoDealType() description];
-    SecShowSimResult([NSString stringWithFormat:@"已触发 czlx=%@", typeHint]);
-}
-
 static void SecSimulateAutoArrive(void) {
     if (!g_stations.count) {
         SecShowSimResult(@"请先打开任务详情");
+        NSLog(@"[SecToggle] 模拟自动到达失败：无站点");
         return;
     }
     if (!g_enabled) {
         SecShowSimResult(@"请先打开开关");
-        return;
-    }
-    if (g_simInFlight) {
-        SecShowSimResult(@"上一笔模拟仍在进行");
         return;
     }
 
@@ -1009,10 +637,33 @@ static void SecSimulateAutoArrive(void) {
     g_lastSimTime = now;
 
     NSDictionary *t = DisplayStation();
-    SecPanelLog(@"模拟 → %@", SecStationTitle(t));
-    dispatch_async(dispatch_get_main_queue(), ^{
-        SecSimulateAutoArriveImpl();
-    });
+    NSLog(@"[SecToggle] 模拟自动到达 → %@ wd=%f jd=%f",
+          SecStationTitle(t), [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]);
+
+    SecInstallDealTaskHooks();
+    SecInstallStayedHooks();
+    SecCollectTaskIdsFromUI();
+
+    g_simulatingAuto = YES;
+    g_forceAutoCzlx = YES;
+
+    NSInteger n = SecDirectDealTask();
+    if (n == 0) {
+        n = SecTriggerAutoStayedOnce();
+    }
+
+    if (n == 0) {
+        SecClearSimFlags();
+        SecShowSimResult(@"未找到自动入口，请开关ON等待围栏或手动点到达");
+        NSLog(@"[SecToggle] 无 Stayed 目标 zddm=%@", t[@"zddm"]);
+    } else {
+        SecScheduleClearSimFlags();
+        if (g_lastDealType.length) {
+            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", g_lastDealType]);
+        } else {
+            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", SecAutoDealType()]);
+        }
+    }
 }
 
 #pragma mark - dealTask 日志
@@ -1036,19 +687,11 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
     }
 
     id useType = dealType;
-    if (SecIsSimActive()) {
-        useType = SecAutoDealType();
-    }
-
-    if (SecShouldSkipDuplicateSimDeal(useZddm)) {
-        SecPanelLog(@"跳过重复 dealTask %@", useZddm);
-        if (completion) {
-            void (^cb)(id, NSError *) = completion;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                cb(nil, nil);
-            });
+    if (g_simulatingAuto || g_inAutoStayedChain || g_forceAutoCzlx) {
+        if (SecIsManualDealType(dealType)) {
+            useType = SecAutoDealType();
+            NSLog(@"[SecToggle] 强制自动 dealType %@ → %@", dealType, useType);
         }
-        return;
     }
 
     g_lastDealType = [useType description];
@@ -1057,17 +700,16 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
         g_cachedAutoDealType = useType;
     }
 
-    id wrappedCompletion = SecIsSimActive() ? SecWrapSimCompletion(completion) : completion;
-
-    SecPanelLog(@"dealTask %@ zddm=%@ type=%@", g_lastDealClass, useZddm, useType);
-    orig_dealTask(self, _cmd, bcdh, bcmxdh, useZddm, useLat, useLon, fjsj, useType, wrappedCompletion);
+    NSLog(@"[SecToggle] dealTask class=%@ zddm=%@ dealType=%@ lat=%@ lon=%@",
+          g_lastDealClass, useZddm, useType, useLat, useLon);
+    orig_dealTask(self, _cmd, bcdh, bcmxdh, useZddm, useLat, useLon, fjsj, useType, completion);
 }
 
 static void SecInstallDealTaskHooks(void) {
     static BOOL installed = NO;
     if (installed) return;
 
-    SEL sel = SecDealTaskSel();
+    SEL sel = @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
     int num = objc_getClassList(NULL, 0);
     if (num <= 0) return;
 
@@ -1099,7 +741,7 @@ static void SecInstallDealTaskHooks(void) {
         Method m = class_getInstanceMethod(hookCls, sel);
         orig_dealTask = (void (*)(id, SEL, id, id, id, id, id, id, id, id))method_getImplementation(m);
         method_setImplementation(m, (IMP)hook_dealTask);
-        SecPanelLog(@"Hook dealTask ← %@", NSStringFromClass(hookCls));
+        NSLog(@"[SecToggle] Hook dealTask ← %@", NSStringFromClass(hookCls));
         installed = YES;
     }
     free(classes);
@@ -1134,7 +776,7 @@ static void SecCreatePanel(void) {
         return;
     }
 
-    CGFloat pw = 280, ph = 232;
+    CGFloat pw = 280, ph = 148;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(20, 120, pw, ph)];
     g_panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
     g_panel.layer.cornerRadius = 10;
@@ -1150,15 +792,15 @@ static void SecCreatePanel(void) {
     [sw addTarget:[SecToggleHandler shared] action:@selector(onToggle:) forControlEvents:UIControlEventValueChanged];
     [g_panel addSubview:sw];
 
-    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 28, pw - 16, 34)];
+    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 28, pw - 16, 52)];
     g_statusLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
     g_statusLabel.font = [UIFont systemFontOfSize:11];
-    g_statusLabel.numberOfLines = 2;
+    g_statusLabel.numberOfLines = 3;
     g_statusLabel.text = @"站点: 请先打开任务详情";
     [g_panel addSubview:g_statusLabel];
 
     UIButton *btnNext = [UIButton buttonWithType:UIButtonTypeSystem];
-    btnNext.frame = CGRectMake(8, 62, 120, 32);
+    btnNext.frame = CGRectMake(8, 88, 120, 34);
     [btnNext setTitle:@"下一站" forState:UIControlStateNormal];
     [btnNext setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     btnNext.backgroundColor = [UIColor colorWithRed:0.2 green:0.45 blue:0.85 alpha:1];
@@ -1167,7 +809,7 @@ static void SecCreatePanel(void) {
     [g_panel addSubview:btnNext];
 
     UIButton *btnAuto = [UIButton buttonWithType:UIButtonTypeSystem];
-    btnAuto.frame = CGRectMake(136, 62, 136, 32);
+    btnAuto.frame = CGRectMake(136, 88, 136, 34);
     [btnAuto setTitle:@"模拟自动到达" forState:UIControlStateNormal];
     [btnAuto setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     btnAuto.backgroundColor = [UIColor colorWithRed:0.72 green:0.38 blue:0.05 alpha:1];
@@ -1175,32 +817,12 @@ static void SecCreatePanel(void) {
     [btnAuto addTarget:[SecToggleHandler shared] action:@selector(onSimAutoArrive:) forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:btnAuto];
 
-    UIView *logBg = [[UIView alloc] initWithFrame:CGRectMake(6, 98, pw - 12, ph - 104)];
-    logBg.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    logBg.layer.cornerRadius = 6;
-    [g_panel addSubview:logBg];
-
-    UILabel *logTitle = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, pw - 28, 14)];
-    logTitle.text = @"日志";
-    logTitle.textColor = [UIColor colorWithWhite:0.55 alpha:1];
-    logTitle.font = [UIFont systemFontOfSize:9];
-    [logBg addSubview:logTitle];
-
-    g_logLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 18, pw - 24, ph - 122)];
-    g_logLabel.textColor = [UIColor colorWithRed:0.55 green:0.85 blue:1.0 alpha:1];
-    g_logLabel.font = [UIFont systemFontOfSize:9];
-    g_logLabel.numberOfLines = kSecMaxLogLines;
-    g_logLabel.text = @"—";
-    [logBg addSubview:g_logLabel];
-
-    if (!g_logLines) g_logLines = [NSMutableArray array];
-
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[SecToggleHandler shared] action:@selector(onPan:)];
     [g_panel addGestureRecognizer:pan];
 
     [win addSubview:g_panel];
     [win bringSubviewToFront:g_panel];
-    SecPanelLog(@"悬浮窗已显示（含模拟自动到达）");
+    NSLog(@"[SecToggle] 悬浮窗已显示（含模拟自动到达）");
 }
 
 @implementation SecToggleHandler {
@@ -1216,23 +838,8 @@ static void SecCreatePanel(void) {
 
 - (void)onToggle:(UISwitch *)sender {
     g_enabled = sender.isOn;
-    SecPanelLog(@"开关 %@", g_enabled ? @"ON" : @"OFF");
+    NSLog(@"[SecToggle] 开关 %@", g_enabled ? @"ON" : @"OFF");
     SecUpdateStatusLabel();
-    if (g_enabled && g_stations.count) {
-        SecRefreshFakeLocation();
-        NSDictionary *t = DisplayStation();
-        if (t) {
-            SecPanelLog(@"GPS→%@", SecStationTitle(t));
-        }
-        SecStartGpsPulse();
-        if (!g_taskBcmxdh.length || !g_dealTaskTarget) {
-            SecCollectTaskIdsFromUI();
-            if (g_taskBcmxdh.length) SecPanelLog(@"bcmxdh %@", g_taskBcmxdh);
-            if (g_dealTaskTarget) SecPanelLog(@"已缓存 service");
-        }
-    } else {
-        SecStopGpsPulse();
-    }
 }
 
 - (void)onNext:(id)sender {
@@ -1257,47 +864,16 @@ static void SecCreatePanel(void) {
 #pragma mark - Hooks
 
 static CLLocationCoordinate2D (*orig_coord)(id, SEL);
-static double (*orig_latitude)(id, SEL);
-static double (*orig_longitude)(id, SEL);
-static CLLocation *(*orig_managerLocation)(id, SEL);
 
 static CLLocationCoordinate2D hook_coord(id self, SEL _cmd) {
     NSDictionary *t = SpoofTarget();
     if (t) {
-        double lat, lon;
-        SecSpoofedCoords(t, &lat, &lon, SecShouldJitterGps());
         CLLocationCoordinate2D c;
-        c.latitude = lat;
-        c.longitude = lon;
+        c.latitude = [t[@"wd"] doubleValue];
+        c.longitude = [t[@"jd"] doubleValue];
         return c;
     }
     return orig_coord(self, _cmd);
-}
-
-static double hook_latitude(id self, SEL _cmd) {
-    NSDictionary *t = SpoofTarget();
-    if (t) {
-        double lat, lon;
-        SecSpoofedCoords(t, &lat, &lon, SecShouldJitterGps());
-        return lat;
-    }
-    return orig_latitude(self, _cmd);
-}
-
-static double hook_longitude(id self, SEL _cmd) {
-    NSDictionary *t = SpoofTarget();
-    if (t) {
-        double lat, lon;
-        SecSpoofedCoords(t, &lat, &lon, SecShouldJitterGps());
-        return lon;
-    }
-    return orig_longitude(self, _cmd);
-}
-
-static CLLocation *hook_managerLocation(id self, SEL _cmd) {
-    CLLocation *fake = SecFakeLocation();
-    if (fake) return fake;
-    return orig_managerLocation(self, _cmd);
 }
 
 static void (*orig_setBody)(id, SEL, NSData *);
@@ -1310,10 +886,10 @@ static void hook_setBody(id self, SEL _cmd, NSData *body) {
             NSString *url = req.URL.absoluteString;
             if ([url containsString:@"/app/sjb/v1"] &&
                 ([url containsString:@"rwcz"] || [url containsString:@"car/"])) {
-                NSString *patched = PatchJsonForRequest(raw, url);
+                NSString *patched = PatchJson(raw);
                 if (![patched isEqualToString:raw]) {
                     body = [patched dataUsingEncoding:NSUTF8StringEncoding];
-                    SecPanelLog(@"改包 %@", SecShortURL(url));
+                    NSLog(@"[SecToggle] 改包 %@", url);
                 }
             }
         }
@@ -1342,24 +918,6 @@ static void SecInstallHooks(void) {
         method_setImplementation(m1, (IMP)(void *)hook_coord);
     }
 
-    Method mLat = class_getInstanceMethod([CLLocation class], @selector(latitude));
-    if (mLat) {
-        orig_latitude = (double (*)(id, SEL))method_getImplementation(mLat);
-        method_setImplementation(mLat, (IMP)hook_latitude);
-    }
-
-    Method mLon = class_getInstanceMethod([CLLocation class], @selector(longitude));
-    if (mLon) {
-        orig_longitude = (double (*)(id, SEL))method_getImplementation(mLon);
-        method_setImplementation(mLon, (IMP)hook_longitude);
-    }
-
-    Method mLoc = class_getInstanceMethod([CLLocationManager class], @selector(location));
-    if (mLoc) {
-        orig_managerLocation = (CLLocation *(*)(id, SEL))method_getImplementation(mLoc);
-        method_setImplementation(mLoc, (IMP)hook_managerLocation);
-    }
-
     Method m2 = class_getInstanceMethod([NSMutableURLRequest class], @selector(setHTTPBody:));
     if (m2) {
         orig_setBody = (void (*)(id, SEL, NSData *))method_getImplementation(m2);
@@ -1372,23 +930,21 @@ static void SecInstallHooks(void) {
         method_setImplementation(m3, (IMP)hook_jsonData);
     }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         SecInstallDealTaskHooks();
         SecInstallStayedHooks();
-        dispatch_async(dispatch_get_main_queue(), ^{
-            SecPanelLog(@"业务 Hook 就绪");
-        });
+        SecInstallTapOpeInHooks();
     });
 
-    SecPanelLog(@"Hooks 安装完成");
+    NSLog(@"[SecToggle] Hooks 安装完成");
 }
 
 #pragma mark - 入口
 
 __attribute__((constructor))
 static void SecToggleEntry(void) {
+    SecInstallHooks();
     dispatch_async(dispatch_get_main_queue(), ^{
-        SecInstallHooks();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             SecCreatePanel();
         });
