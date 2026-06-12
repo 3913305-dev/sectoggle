@@ -22,6 +22,9 @@ clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=13.0 \
   "$APP_DIR/SecLicenseCore.m"
 
 cp "$APP_DIR/Info.plist" "$PAYLOAD/Info.plist"
+ICON_DIR="$APP_DIR/Icons"
+cp "$ICON_DIR/AppIcon60x60@2x.png" "$PAYLOAD/AppIcon60x60@2x.png"
+cp "$ICON_DIR/AppIcon60x60@3x.png" "$PAYLOAD/AppIcon60x60@3x.png"
 
 cd "$BUILD"
 zip -qr SecLicense.ipa Payload
