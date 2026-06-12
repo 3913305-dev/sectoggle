@@ -107,26 +107,39 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
     double lon = ParseDouble(jd);
     double lat = ParseDouble(wd);
     NSString *zddm = [dict[@"c_zddm"] ?: dict[@"zddm"] ?: @"" description];
+    if ([zddm isEqualToString:@"(null)"] || [zddm isEqualToString:@"<null>"]) zddm = @"";
     id nameRaw = dict[@"c_zdmc"] ?: dict[@"c_zdjmc"] ?: dict[@"c_zdwz"] ?: dict[@"name"];
     NSString *name = [nameRaw description];
     if ([name isEqualToString:@"(null)"] || [name isEqualToString:@"<null>"]) name = @"";
 
-    if (!isnan(lon) && !isnan(lat) && (lon != 0 || lat != 0)) {
+    if (zddm.length && !isnan(lon) && !isnan(lat) && (lon != 0 || lat != 0)) {
+        NSInteger queue = [ParseDouble(dict[@"n_queue"]) integerValue];
         NSString *key = [NSString stringWithFormat:@"%@@%f,%f", zddm, lon, lat];
         BOOL exists = NO;
         for (NSMutableDictionary *s in g_stations) {
-            if ([s[@"key"] isEqualToString:key]) {
+            if ([s[@"key"] isEqualToString:key] || [s[@"zddm"] isEqualToString:zddm]) {
                 exists = YES;
-                if (name.length && ![s[@"name"] length]) {
-                    s[@"name"] = name;
-                }
+                if (name.length) s[@"name"] = name;
+                if (queue > 0) s[@"queue"] = @(queue);
+                s[@"jd"] = @(lon);
+                s[@"wd"] = @(lat);
                 break;
             }
         }
         if (!exists) {
-            [g_stations addObject:[@{@"key":key, @"zddm":zddm, @"name":name,
-                                     @"jd":@(lon), @"wd":@(lat)} mutableCopy]];
-            NSLog(@"[SecToggle] 站点 %@ %@ wd=%f jd=%f", zddm, name, lat, lon);
+            NSMutableDictionary *entry = [@{@"key":key, @"zddm":zddm, @"name":name,
+                                            @"jd":@(lon), @"wd":@(lat), @"queue":@(queue)} mutableCopy];
+            [g_stations addObject:entry];
+            NSLog(@"[SecToggle] 站点 %@ %@ q=%ld wd=%f jd=%f", zddm, name, (long)queue, lat, lon);
+            [g_stations sortUsingComparator:^NSComparisonResult(id a, id b) {
+                NSInteger qa = [a[@"queue"] integerValue];
+                NSInteger qb = [b[@"queue"] integerValue];
+                if (qa > 0 && qb > 0) {
+                    if (qa < qb) return NSOrderedAscending;
+                    if (qa > qb) return NSOrderedDescending;
+                }
+                return NSOrderedSame;
+            }];
             dispatch_async(dispatch_get_main_queue(), ^{
                 SecUpdateStatusLabel();
             });
@@ -143,10 +156,79 @@ static NSDictionary *DisplayStation(void) {
 static NSString *SecStationTitle(NSDictionary *t) {
     if (!t) return @"未知站点";
     NSString *name = [t[@"name"] description];
-    if (name.length && ![name isEqualToString:@"(null)"]) return name;
     NSString *zddm = [t[@"zddm"] description];
-    if (zddm.length && ![zddm isEqualToString:@"(null)"]) return zddm;
+    BOOL hasName = name.length && ![name isEqualToString:@"(null)"];
+    BOOL hasZddm = zddm.length && ![zddm isEqualToString:@"(null)"];
+    if (hasName && hasZddm) return [NSString stringWithFormat:@"%@ · %@", name, zddm];
+    if (hasName) return name;
+    if (hasZddm) return zddm;
     return @"未命名站点";
+}
+
+static NSString *SecPatchCoordField(NSString *raw, NSString *key, double value) {
+    NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9.eE+-]+\"?", key];
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
+    NSString *rep = [NSString stringWithFormat:@"\"%@\":%f", key, value];
+    return [re stringByReplacingMatchesInString:raw options:0 range:NSMakeRange(0, raw.length) withTemplate:rep];
+}
+
+static NSString *SecPatchStringField(NSString *raw, NSString *key, NSString *value) {
+    if (!value.length) return raw;
+    NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"[^\"]*\"", key];
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
+    NSString *rep = [NSString stringWithFormat:@"\"%@\":\"%@\"", key, value];
+    return [re stringByReplacingMatchesInString:raw options:0 range:NSMakeRange(0, raw.length) withTemplate:rep];
+}
+
+static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
+    NSDictionary *t = CurrentTarget();
+    if (!t) return raw;
+
+    double jd = [t[@"jd"] doubleValue];
+    double wd = [t[@"wd"] doubleValue];
+    NSString *zddm = [t[@"zddm"] description];
+    NSString *out = raw;
+
+    BOOL isArrive = [url containsString:@"rwcz"] &&
+        ([url containsString:@"zddd"] || [url containsString:@"zdqd"] ||
+         [url containsString:@"zdlk"] || [url containsString:@"/qd"]);
+
+    if (isArrive) {
+        NSArray *allKeys = @[@"n_jd", @"n_wd", @"n_zdjd", @"n_zdwd",
+                             @"gpslongitude", @"gpslatitude", @"longitude", @"latitude", @"lng", @"lat"];
+        for (NSString *key in allKeys) {
+            BOOL isLat = [key isEqualToString:@"n_wd"] || [key isEqualToString:@"n_zdwd"] ||
+                         [key isEqualToString:@"lat"] || [key isEqualToString:@"latitude"] ||
+                         [key isEqualToString:@"gpslatitude"];
+            out = SecPatchCoordField(out, key, isLat ? wd : jd);
+        }
+        out = SecPatchStringField(out, @"c_zddm", zddm);
+        out = SecPatchStringField(out, @"zddm", zddm);
+        NSLog(@"[SecToggle] 到达改包 → %@ wd=%f jd=%f", SecStationTitle(t), wd, jd);
+    } else {
+        NSArray *gpsKeys = @[@"n_jd", @"n_wd", @"gpslongitude", @"gpslatitude",
+                             @"longitude", @"latitude", @"lng", @"lat"];
+        for (NSString *key in gpsKeys) {
+            BOOL isLat = [key isEqualToString:@"n_wd"] || [key isEqualToString:@"lat"] ||
+                         [key isEqualToString:@"latitude"] || [key isEqualToString:@"gpslatitude"];
+            out = SecPatchCoordField(out, key, isLat ? wd : jd);
+        }
+    }
+
+    if (g_simulatingAuto || g_forceAutoCzlx) {
+        NSString *autoCzlx = [SecAutoDealType() description];
+        for (NSString *key in @[@"n_czlx", @"c_czlx", @"czlx"]) {
+            NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9]+\"?", key];
+            NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
+            NSString *rep = [NSString stringWithFormat:@"\"%@\":%@", key, autoCzlx];
+            out = [re stringByReplacingMatchesInString:out options:0 range:NSMakeRange(0, out.length) withTemplate:rep];
+        }
+    }
+    return out;
+}
+
+static NSString *PatchJson(NSString *raw) {
+    return PatchJsonForRequest(raw, @"");
 }
 
 static NSDictionary *SpoofTarget(void) {
@@ -169,40 +251,6 @@ static void NextStation(void) {
     if (g_stations.count == 0) return;
     g_stationIndex = (g_stationIndex + 1) % g_stations.count;
     RefreshTarget();
-}
-
-static NSString *PatchJson(NSString *raw) {
-    NSDictionary *t = CurrentTarget();
-    if (!t) return raw;
-    double jd = [t[@"jd"] doubleValue];
-    double wd = [t[@"wd"] doubleValue];
-    NSArray *keys = @[@"n_jd",@"n_wd",@"n_zdjd",@"n_zdwd",
-                      @"gpslongitude",@"gpslatitude",@"longitude",@"latitude",@"lng",@"lat"];
-    NSString *out = raw;
-    for (NSString *key in keys) {
-        NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9.eE+-]+\"?", key];
-        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
-        NSString *rep;
-        if ([key isEqualToString:@"n_wd"] || [key isEqualToString:@"n_zdwd"] ||
-            [key isEqualToString:@"lat"] || [key isEqualToString:@"latitude"] || [key isEqualToString:@"gpslatitude"]) {
-            rep = [NSString stringWithFormat:@"\"%@\":%f", key, wd];
-        } else {
-            rep = [NSString stringWithFormat:@"\"%@\":%f", key, jd];
-        }
-        out = [re stringByReplacingMatchesInString:out options:0 range:NSMakeRange(0, out.length) withTemplate:rep];
-    }
-
-    if (g_simulatingAuto || g_forceAutoCzlx) {
-        NSString *autoCzlx = [SecAutoDealType() description];
-        NSArray *czKeys = @[@"n_czlx", @"c_czlx", @"czlx"];
-        for (NSString *key in czKeys) {
-            NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9]+\"?", key];
-            NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
-            NSString *rep = [NSString stringWithFormat:@"\"%@\":%@", key, autoCzlx];
-            out = [re stringByReplacingMatchesInString:out options:0 range:NSMakeRange(0, out.length) withTemplate:rep];
-        }
-    }
-    return out;
 }
 
 #pragma mark - 方案 B：模拟自动到达
@@ -649,6 +697,20 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
                           id lat, id lon, id fjsj, id dealType, id completion) {
     g_dealTaskTarget = self;
 
+    id useZddm = zddm;
+    id useLat = lat;
+    id useLon = lon;
+    if (g_enabled || g_simulatingAuto || g_forceAutoCzlx) {
+        NSDictionary *t = CurrentTarget();
+        if (t) {
+            useZddm = t[@"zddm"] ?: zddm;
+            useLat = t[@"wd"] ?: lat;
+            useLon = t[@"jd"] ?: lon;
+            NSLog(@"[SecToggle] 统一站点 → %@ zddm=%@ wd=%@ jd=%@",
+                  SecStationTitle(t), useZddm, useLat, useLon);
+        }
+    }
+
     id useType = dealType;
     if (g_simulatingAuto || g_inAutoStayedChain || g_forceAutoCzlx) {
         if (SecIsManualDealType(dealType)) {
@@ -664,8 +726,8 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
     }
 
     NSLog(@"[SecToggle] dealTask class=%@ zddm=%@ dealType=%@ lat=%@ lon=%@",
-          g_lastDealClass, zddm, useType, lat, lon);
-    orig_dealTask(self, _cmd, bcdh, bcmxdh, zddm, lat, lon, fjsj, useType, completion);
+          g_lastDealClass, useZddm, useType, useLat, useLon);
+    orig_dealTask(self, _cmd, bcdh, bcmxdh, useZddm, useLat, useLon, fjsj, useType, completion);
 }
 
 static void SecInstallDealTaskHooks(void) {
@@ -849,7 +911,7 @@ static void hook_setBody(id self, SEL _cmd, NSData *body) {
             NSString *url = req.URL.absoluteString;
             if ([url containsString:@"/app/sjb/v1"] &&
                 ([url containsString:@"rwcz"] || [url containsString:@"car/"])) {
-                NSString *patched = PatchJson(raw);
+                NSString *patched = PatchJsonForRequest(raw, url);
                 if (![patched isEqualToString:raw]) {
                     body = [patched dataUsingEncoding:NSUTF8StringEncoding];
                     NSLog(@"[SecToggle] 改包 %@", url);
