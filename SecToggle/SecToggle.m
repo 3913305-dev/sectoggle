@@ -1120,7 +1120,7 @@ static BOOL SecObjectSupportsPlateScan(id obj) {
     if (!obj) return NO;
     NSString *cn = NSStringFromClass([obj class]);
     if ([cn isEqualToString:@"WTPlateIDCameraViewController"]) return YES;
-    if ([[SecPlateKnownVCNames] containsObject:cn]) return YES;
+    if ([SecPlateKnownVCNames() containsObject:cn]) return YES;
     if ([cn hasPrefix:@"XPD"] || [cn hasPrefix:@"WTPlate"]) {
         if (SecObjectHasScanCallbacks(obj) || SecObjectHasScanUI(obj)) return YES;
         static NSArray *nameHints;
@@ -1316,7 +1316,7 @@ static void SecInvokePlateScanSuccess(id obj, NSString *plate, id color) {
         return;
     }
     if ([obj respondsToSelector:@selector(setCPH:cldm:)]) {
-        id cldm = SecKVCTry(obj, @"cldm") ?: SecStringFromKV(obj, @[@"c_cldm", @"cldm", @"c_xcldm"]);
+        NSString *cldm = SecStringFromKV(obj, @[@"cldm", @"c_cldm", @"c_xcldm"]);
         if (cldm.length) {
             ((void (*)(id, SEL, id, id))objc_msgSend)(
                 obj, @selector(setCPH:cldm:), plate, cldm);
