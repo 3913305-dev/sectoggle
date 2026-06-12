@@ -28,6 +28,8 @@ static void SecUpdateClockTargetFromObject(id obj, NSInteger depth);
 static void SecSetClockActive(BOOL active);
 static void SecDeactivateClock(void);
 static BOOL SecPlateIsCurrTaskVC(id obj);
+static BOOL SecPlateScanConfirmed(id obj);
+static void SecApplyDispatchScanConfirmUI(id obj, NSString *plate);
 static void SecPanelLog(NSString *format, ...);
 static void SecDebugLog(NSString *format, ...);
 static NSString *SecStationTitle(NSDictionary *t);
@@ -1901,6 +1903,53 @@ static void SecApplyPlateToUI(id obj, NSString *plate) {
     }
 }
 
+static void SecApplyPlateToVisibleCells(UIViewController *vc, NSString *plate);
+
+static void SecSetPlateScanConfirmed(id obj, BOOL confirmed) {
+    if (!obj) return;
+    if ([obj respondsToSelector:@selector(setIsCheckedDispatchVeh:)]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(obj, @selector(setIsCheckedDispatchVeh:), confirmed);
+    } else {
+        @try { [obj setValue:@(confirmed) forKey:@"isCheckedDispatchVeh"]; } @catch (NSException *e) {}
+    }
+}
+
+static BOOL SecPlateScanConfirmed(id obj) {
+    if (!obj) return NO;
+    id flag = SecKVCTry(obj, @"isCheckedDispatchVeh");
+    if (flag && [flag boolValue]) return YES;
+    id model = SecKVCTry(obj, @"checkModel");
+    if (model) {
+        id mf = SecKVCTry(model, @"isCheckedDispatchVeh");
+        if (mf && [mf boolValue]) return YES;
+    }
+    return NO;
+}
+
+static void SecApplyDispatchScanConfirmUI(id obj, NSString *plate) {
+    if (!obj || !plate.length || SecPlateIsCurrTaskVC(obj) || !SecPlateSkipScanTarget(obj)) return;
+
+    NSArray *labelKeys = @[
+        @"licensePlateNumLab", @"labRegname", @"labRegname1",
+        @"labRegnameField", @"labRegnameField1", @"cphLabel", @"carNoLab", @"lbCph", @"carNolab"
+    ];
+    for (NSString *k in labelKeys) {
+        id lab = SecKVCTry(obj, k);
+        if ([lab respondsToSelector:@selector(setText:)]) {
+            [lab setText:plate];
+        }
+    }
+    id tf = SecKVCTry(obj, @"licensePlateTF");
+    if ([tf respondsToSelector:@selector(setText:)]) {
+        [tf setText:plate];
+    }
+    if ([obj isKindOfClass:[UIViewController class]]) {
+        UIViewController *vc = (UIViewController *)obj;
+        SecApplyPlateToViewHierarchy(vc.view, plate, 0);
+        SecApplyPlateToVisibleCells(vc, plate);
+    }
+}
+
 static void SecApplyPlateToVisibleCells(UIViewController *vc, NSString *plate) {
     if (!vc || !plate.length) return;
     for (UIView *sub in vc.view.subviews) {
@@ -1938,7 +1987,16 @@ static void SecInvokePlateScanSuccess(id obj, NSString *plate, id color, BOOL to
                 obj, @selector(setCPH:cldm:), plate, cldm);
         }
     }
-    if (touchUI && !SecPlateIsCurrTaskVC(obj)) {
+    if ([obj respondsToSelector:@selector(checkIsOwnRegname:color:)]) {
+        ((BOOL (*)(id, SEL, id, id))objc_msgSend)(
+            obj, @selector(checkIsOwnRegname:color:), plate, color ?: @"1");
+    }
+    if (!SecPlateScanConfirmed(obj)) {
+        SecSetPlateScanConfirmed(obj, YES);
+    }
+    if (SecPlateSkipScanTarget(obj)) {
+        SecApplyDispatchScanConfirmUI(obj, plate);
+    } else if (touchUI && !SecPlateIsCurrTaskVC(obj)) {
         SecApplyPlateToUI(obj, plate);
     }
 }
@@ -1967,8 +2025,10 @@ static BOOL SecTryAutoFillPlateOnObject(id obj, BOOL allowRetry) {
         g_plateFilledObjects = [NSMapTable weakToStrongObjectsMapTable];
     }
 
+    if (SecPlateScanConfirmed(target)) return YES;
+
     NSString *cached = [g_plateFilledObjects objectForKey:target];
-    if (cached.length) return YES;
+    if (cached.length && SecPlateScanConfirmed(target)) return YES;
 
     NSString *plate = SecResolvePlateForObject(target);
     if (!plate.length) {
@@ -1979,24 +2039,31 @@ static BOOL SecTryAutoFillPlateOnObject(id obj, BOOL allowRetry) {
     id color = SecReadPlateColorFromObject(target) ?: @"1";
     SecInvokePlateScanSuccess(target, plate, color, NO);
 
-    [g_plateFilledObjects setObject:plate forKey:target];
+    BOOL confirmed = SecPlateScanConfirmed(target) || SecPlateVisibleOnObject(target, plate);
+    if (!confirmed) {
+        SecDebugLog(@"扫牌回调后未确认 %@ %@", plate, NSStringFromClass([target class]));
+        return NO;
+    }
+
+    if (!cached.length) {
+        [g_plateFilledObjects setObject:plate forKey:target];
+        SecPanelLog(@"已跳过扫牌 %@", plate);
+        SecDebugLog(@"跳过扫牌 %@ color=%@ target=%@", plate, color, NSStringFromClass([target class]));
+    }
 
     if ([cn isEqualToString:@"WTPlateIDCameraViewController"] && [obj isKindOfClass:[UIViewController class]]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [(UIViewController *)obj dismissViewControllerAnimated:YES completion:nil];
         });
     }
-
-    SecPanelLog(@"已跳过扫牌 %@", plate);
-    SecDebugLog(@"跳过扫牌 %@ color=%@ target=%@", plate, color, NSStringFromClass([target class]));
     return YES;
 }
 
 static void SecSchedulePlateAutoFill(id obj) {
     if (!g_licensed || !obj) return;
     __weak id weakObj = obj;
-    for (int attempt = 0; attempt < 2; attempt++) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.35 + attempt * 0.5) * NSEC_PER_SEC)),
+    for (int attempt = 0; attempt < 3; attempt++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.5 + attempt * 0.6) * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             SecTryAutoFillPlateOnObject(weakObj, NO);
         });
