@@ -8,24 +8,28 @@
 #import <Foundation/Foundation.h>
 #import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 void SecUpdateStatusLabel(void);
+static void SecInstallDealTaskHooks(void);
 
 @interface SecToggleHandler : NSObject
 + (instancetype)shared;
 - (void)onToggle:(UISwitch *)sender;
 - (void)onNext:(id)sender;
-- (void)onArrive:(id)sender;
+- (void)onSimAutoArrive:(id)sender;
 - (void)onPan:(UIPanGestureRecognizer *)g;
 @end
 
 #pragma mark - 状态
 
 static BOOL g_enabled = NO;
-static NSMutableArray *g_stations = nil; // @{@"zddm",@"name",@"jd",@"wd"}
+static NSMutableArray *g_stations = nil;
 static NSInteger g_stationIndex = 0;
 static UIView *g_panel = nil;
 static UILabel *g_statusLabel = nil;
+static NSString *g_lastDealType = nil;
+static NSString *g_lastDealClass = nil;
 
 #pragma mark - 工具
 
@@ -62,7 +66,6 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
                                     @"jd":@(lon), @"wd":@(lat)}];
             NSLog(@"[SecToggle] 站点 %@ %@ wd=%f jd=%f", zddm, name, lat, lon);
             dispatch_async(dispatch_get_main_queue(), ^{
-                extern void SecUpdateStatusLabel(void);
                 SecUpdateStatusLabel();
             });
         }
@@ -108,6 +111,144 @@ static NSString *PatchJson(NSString *raw) {
     return out;
 }
 
+#pragma mark - 方案 B：模拟自动到达
+
+static NSInteger SecInvokeSelector(id obj, SEL sel) {
+    if (!obj || !sel || ![obj respondsToSelector:sel]) return 0;
+    @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        ((void (*)(id, SEL))objc_msgSend)(obj, sel);
+#pragma clang diagnostic pop
+        NSLog(@"[SecToggle] 已触发 %@ ← %@", NSStringFromSelector(sel), [obj class]);
+        return 1;
+    } @catch (NSException *e) {
+        NSLog(@"[SecToggle] 触发 %@ 失败: %@", NSStringFromSelector(sel), e);
+        return 0;
+    }
+}
+
+static void SecWalkTriggerStayed(id node, SEL sel, NSInteger *count, NSMutableSet *seen) {
+    if (!node) return;
+    NSValue *key = [NSValue valueWithNonretainedObject:node];
+    if ([seen containsObject:key]) return;
+    [seen addObject:key];
+
+    *count += SecInvokeSelector(node, sel);
+
+    if ([node isKindOfClass:[UIView class]]) {
+        for (UIView *sub in [(UIView *)node subviews]) {
+            SecWalkTriggerStayed(sub, sel, count, seen);
+        }
+    }
+    SecWalkTriggerStayed([node nextResponder], sel, count, seen);
+}
+
+static NSInteger SecTriggerInWindows(SEL sel) {
+    NSInteger count = 0;
+    NSMutableSet *seen = [NSMutableSet set];
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        SecWalkTriggerStayed(win, sel, &count, seen);
+        SecWalkTriggerStayed(win.rootViewController, sel, &count, seen);
+    }
+    return count;
+}
+
+static void SecTriggerAMapGeoFenceStayed(void) {
+    Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
+    if (!mgrCls) return;
+
+    SEL sharedSel = @selector(sharedGeoFence);
+    if (![mgrCls respondsToSelector:sharedSel]) return;
+
+    id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, sharedSel);
+    if (!mgr) return;
+
+    SecInvokeSelector(mgr, @selector(amapGeoFenceRegionStatusDidChangedToStayed:));
+
+    id delegate = nil;
+    if ([mgr respondsToSelector:@selector(delegate)]) {
+        delegate = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(delegate));
+    }
+    if (delegate) {
+        SEL delSel = @selector(amapGeoFenceManager:didGeoFencesStatusChangedForRegion:customID:error:);
+        if ([delegate respondsToSelector:delSel]) {
+            NSLog(@"[SecToggle] 发现 AMap 围栏 delegate: %@", [delegate class]);
+        }
+        SecInvokeSelector(delegate, @selector(amapGeoFenceRegionStatusDidChangedToStayed:));
+        SecInvokeSelector(delegate, @selector(handleWhenStayedTimerFired:));
+    }
+}
+
+static void SecSimulateAutoArrive(void) {
+    if (!g_stations.count) {
+        NSLog(@"[SecToggle] 模拟自动到达失败：无站点，请先打开任务详情");
+        return;
+    }
+    if (!g_enabled) {
+        NSLog(@"[SecToggle] 模拟自动到达失败：请先打开开关");
+        return;
+    }
+
+    NSDictionary *t = CurrentTarget();
+    NSLog(@"[SecToggle] 模拟自动到达 → 站 %@ wd=%f jd=%f",
+          t[@"zddm"], [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]);
+
+    SecInstallDealTaskHooks();
+
+    NSInteger n = 0;
+    n += SecTriggerInWindows(@selector(handleWhenStayedTimerFired:));
+    n += SecTriggerInWindows(@selector(amapGeoFenceRegionStatusDidChangedToStayed:));
+    SecTriggerAMapGeoFenceStayed();
+
+    if (n == 0) {
+        NSLog(@"[SecToggle] 未找到 Stayed 回调对象，请停留在任务/站点页面后重试");
+    } else {
+        NSLog(@"[SecToggle] 共触发 %ld 个 Stayed 回调", (long)n);
+    }
+
+    if (g_lastDealType.length) {
+        NSLog(@"[SecToggle] 最近一次 dealType=%@ (%@)", g_lastDealType, g_lastDealClass);
+    }
+}
+
+#pragma mark - dealTask 日志
+
+static void (*orig_dealTask)(id, SEL, id, id, id, id, id, id, id, id);
+
+static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
+                          id lat, id lon, id fjsj, id dealType, id completion) {
+    g_lastDealType = [dealType description];
+    g_lastDealClass = NSStringFromClass([self class]);
+    NSLog(@"[SecToggle] dealTask class=%@ zddm=%@ dealType=%@ lat=%@ lon=%@",
+          g_lastDealClass, zddm, dealType, lat, lon);
+    orig_dealTask(self, _cmd, bcdh, bcmxdh, zddm, lat, lon, fjsj, dealType, completion);
+}
+
+static void SecInstallDealTaskHooks(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+
+    SEL sel = @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+    int num = objc_getClassList(NULL, 0);
+    if (num <= 0) return;
+
+    Class *classes = (Class *)malloc((size_t)num * sizeof(Class));
+    if (!classes) return;
+    objc_getClassList(classes, num);
+
+    for (int i = 0; i < num; i++) {
+        Method m = class_getInstanceMethod(classes[i], sel);
+        if (!m) continue;
+        orig_dealTask = (void (*)(id, SEL, id, id, id, id, id, id, id, id))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_dealTask);
+        NSLog(@"[SecToggle] Hook dealTask ← %@", NSStringFromClass(classes[i]));
+        installed = YES;
+        break;
+    }
+    free(classes);
+}
+
 #pragma mark - UI
 
 void SecUpdateStatusLabel(void) {
@@ -117,10 +258,13 @@ void SecUpdateStatusLabel(void) {
         g_statusLabel.text = @"站点: 请先打开任务详情";
         return;
     }
-    g_statusLabel.text = [NSString stringWithFormat:@"[%@] %ld/%lu %@\nwd=%.6f jd=%.6f",
+    NSString *dealHint = g_lastDealType.length ?
+        [NSString stringWithFormat:@" dealType=%@", g_lastDealType] : @"";
+    g_statusLabel.text = [NSString stringWithFormat:@"[%@] %ld/%lu %@%@\nwd=%.6f jd=%.6f",
                           g_enabled ? @"ON" : @"OFF",
-                          (long)(g_stationIndex+1), (unsigned long)g_stations.count,
-                          t[@"zddm"], [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]];
+                          (long)(g_stationIndex + 1), (unsigned long)g_stations.count,
+                          t[@"zddm"], dealHint,
+                          [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]];
 }
 
 static void SecCreatePanel(void) {
@@ -130,7 +274,7 @@ static void SecCreatePanel(void) {
         if (!w.hidden && w.alpha > 0) { win = w; break; }
     }
     if (!win) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             SecCreatePanel();
         });
         return;
@@ -142,17 +286,17 @@ static void SecCreatePanel(void) {
     g_panel.layer.cornerRadius = 10;
     g_panel.userInteractionEnabled = YES;
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(8, 6, 170, 20)];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(8, 6, 200, 20)];
     title.text = @"SEC 远程自动到达";
     title.textColor = UIColor.whiteColor;
     title.font = [UIFont boldSystemFontOfSize:13];
     [g_panel addSubview:title];
 
-    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(pw-60, 2, 51, 31)];
+    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(pw - 60, 2, 51, 31)];
     [sw addTarget:[SecToggleHandler shared] action:@selector(onToggle:) forControlEvents:UIControlEventValueChanged];
     [g_panel addSubview:sw];
 
-    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 30, pw-16, 42)];
+    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 30, pw - 16, 42)];
     g_statusLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
     g_statusLabel.font = [UIFont systemFontOfSize:11];
     g_statusLabel.numberOfLines = 0;
@@ -168,47 +312,51 @@ static void SecCreatePanel(void) {
     [btnNext addTarget:[SecToggleHandler shared] action:@selector(onNext:) forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:btnNext];
 
-    UIButton *btnGo = [UIButton buttonWithType:UIButtonTypeSystem];
-    btnGo.frame = CGRectMake(136, 88, 136, 34);
-    [btnGo setTitle:@"标记已到达" forState:UIControlStateNormal];
-    [btnGo setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    btnGo.backgroundColor = [UIColor colorWithRed:0.15 green:0.65 blue:0.35 alpha:1];
-    btnGo.layer.cornerRadius = 6;
-    [btnGo addTarget:[SecToggleHandler shared] action:@selector(onArrive:) forControlEvents:UIControlEventTouchUpInside];
-    [g_panel addSubview:btnGo];
+    UIButton *btnAuto = [UIButton buttonWithType:UIButtonTypeSystem];
+    btnAuto.frame = CGRectMake(136, 88, 136, 34);
+    [btnAuto setTitle:@"模拟自动到达" forState:UIControlStateNormal];
+    [btnAuto setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    btnAuto.backgroundColor = [UIColor colorWithRed:0.72 green:0.38 blue:0.05 alpha:1];
+    btnAuto.layer.cornerRadius = 6;
+    [btnAuto addTarget:[SecToggleHandler shared] action:@selector(onSimAutoArrive:) forControlEvents:UIControlEventTouchUpInside];
+    [g_panel addSubview:btnAuto];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[SecToggleHandler shared] action:@selector(onPan:)];
     [g_panel addGestureRecognizer:pan];
 
     [win addSubview:g_panel];
     [win bringSubviewToFront:g_panel];
-    NSLog(@"[SecToggle] 悬浮窗已显示");
+    NSLog(@"[SecToggle] 悬浮窗已显示（含模拟自动到达）");
 }
 
 @implementation SecToggleHandler {
     CGPoint _panStart;
 }
+
 + (instancetype)shared {
     static SecToggleHandler *h;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ h = [SecToggleHandler new]; });
     return h;
 }
+
 - (void)onToggle:(UISwitch *)sender {
     g_enabled = sender.isOn;
     NSLog(@"[SecToggle] 开关 %@", g_enabled ? @"ON" : @"OFF");
     SecUpdateStatusLabel();
 }
-- (void)onNext:(id)sender { NextStation(); }
-- (void)onArrive:(id)sender {
-    if (!g_stations.count) return;
-    if (!g_enabled) return;
-    NSDictionary *t = CurrentTarget();
-    NSLog(@"[SecToggle] 目标站 %@ 坐标已注入，请在 App 点到达/签到", t[@"zddm"]);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500*NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        NextStation();
+
+- (void)onNext:(id)sender {
+    NextStation();
+}
+
+- (void)onSimAutoArrive:(id)sender {
+    SecSimulateAutoArrive();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        SecUpdateStatusLabel();
     });
 }
+
 - (void)onPan:(UIPanGestureRecognizer *)g {
     if (g.state == UIGestureRecognizerStateBegan) {
         _panStart = g_panel.center;
@@ -217,6 +365,7 @@ static void SecCreatePanel(void) {
         g_panel.center = CGPointMake(_panStart.x + t.x, _panStart.y + t.y);
     }
 }
+
 @end
 
 #pragma mark - Hooks
@@ -277,14 +426,18 @@ static void SecInstallHooks(void) {
     Method m2 = class_getInstanceMethod([NSMutableURLRequest class], @selector(setHTTPBody:));
     if (m2) {
         orig_setBody = (void (*)(id, SEL, NSData *))method_getImplementation(m2);
-        method_setImplementation(m2, (IMP)(void *)hook_setBody);
+        method_setImplementation(m2, (IMP)hook_setBody);
     }
 
     Method m3 = class_getClassMethod([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:));
     if (m3) {
         orig_jsonData = (id (*)(id, SEL, NSData *, NSJSONReadingOptions, NSError **))method_getImplementation(m3);
-        method_setImplementation(m3, (IMP)(void *)hook_jsonData);
+        method_setImplementation(m3, (IMP)hook_jsonData);
     }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        SecInstallDealTaskHooks();
+    });
 
     NSLog(@"[SecToggle] Hooks 安装完成");
 }
@@ -295,7 +448,7 @@ __attribute__((constructor))
 static void SecToggleEntry(void) {
     SecInstallHooks();
     dispatch_async(dispatch_get_main_queue(), ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             SecCreatePanel();
         });
     });
