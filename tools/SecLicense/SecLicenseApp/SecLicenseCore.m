@@ -140,7 +140,7 @@ NSString *SecLicenseExpiryFromDays(NSInteger days) {
     f.dateFormat = @"yyyyMMdd";
     f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     f.timeZone = [NSTimeZone localTimeZone];
-    return [f stringFromString:date];
+    return [f stringFromDate:date];
 }
 
 NSString *SecLicenseGenerateCodeWithExpiry(NSString *uuid, NSString *secret, NSString *expiryYYYYMMDD) {

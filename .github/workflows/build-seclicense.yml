@@ -23,7 +23,7 @@ jobs:
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           rm -rf "$BUILD"
           mkdir -p "$PAYLOAD"
-          xcrun -sdk iphoneos clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=13.0 \
+          if ! xcrun -sdk iphoneos clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=13.0 \
             -fobjc-arc -Wno-deprecated-declarations \
             -framework UIKit -framework Foundation -framework Security \
             -o "$PAYLOAD/SecLicense" \
@@ -32,7 +32,11 @@ jobs:
             "$APP_DIR/IssueViewController.m" \
             "$APP_DIR/ViewController.m" \
             "$APP_DIR/SecDeviceID.m" \
-            "$APP_DIR/SecLicenseCore.m"
+            "$APP_DIR/SecLicenseCore.m" 2>&1 | tee "$ROOT/build.log"; then
+            echo "=== build failed ==="
+            cat "$ROOT/build.log"
+            exit 1
+          fi
           cp "$APP_DIR/Info.plist" "$PAYLOAD/Info.plist"
           ICON_DIR="$APP_DIR/Icons"
           cp "$ICON_DIR/AppIcon60x60@2x.png" "$PAYLOAD/AppIcon60x60@2x.png"
