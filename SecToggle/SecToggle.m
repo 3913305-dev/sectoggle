@@ -182,6 +182,7 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
         if (isnan(sortTime) && queue > 0) sortTime = (double)queue;
 
         NSString *key = [NSString stringWithFormat:@"%@@%f,%f", zddm, lon, lat];
+        BOOL arrived = SecDictIndicatesArrived(dict);
         BOOL exists = NO;
         BOOL changed = NO;
         for (NSMutableDictionary *s in g_stations) {
@@ -204,7 +205,6 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
                 break;
             }
         }
-        BOOL arrived = SecDictIndicatesArrived(dict);
         if (!exists) {
             NSMutableDictionary *entry = [@{@"key":key, @"zddm":zddm, @"name":name,
                                             @"jd":@(lon), @"wd":@(lat), @"queue":@(queue),
