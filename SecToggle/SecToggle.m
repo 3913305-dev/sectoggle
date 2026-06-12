@@ -27,6 +27,7 @@ static void SecInstallClockHooks(void);
 static void SecUpdateClockTargetFromObject(id obj, NSInteger depth);
 static void SecSetClockActive(BOOL active);
 static void SecDeactivateClock(void);
+static BOOL SecPlateIsCurrTaskVC(id obj);
 static void SecPanelLog(NSString *format, ...);
 static void SecDebugLog(NSString *format, ...);
 static NSString *SecStationTitle(NSDictionary *t);
@@ -246,6 +247,11 @@ static BOOL SecIsSignActionView(id obj) {
     return cls && obj && [obj isKindOfClass:cls];
 }
 
+static BOOL SecClockShouldPinView(id view) {
+    if (!view || SecPlateIsCurrTaskVC(view)) return NO;
+    return YES;
+}
+
 static void SecDeactivateClock(void) {
     if (!g_clockActive && !g_clockPinnedView) return;
     g_clockActive = NO;
@@ -255,7 +261,7 @@ static void SecDeactivateClock(void) {
 }
 
 static void SecPinClockView(id view) {
-    if (!SecIsSignActionView(view)) return;
+    if (!SecIsSignActionView(view) || !SecClockShouldPinView(view)) return;
     g_clockPinnedView = view;
     g_clockActive = YES;
     g_clockActiveUntil = 0;
@@ -273,7 +279,7 @@ static void SecSetClockActive(BOOL active) {
 static BOOL SecClockIsActive(void) {
     if (!g_clockActive || !g_clockTarget.count) return NO;
     id view = g_clockPinnedView;
-    if (!view || !SecIsSignActionView(view)) {
+    if (!view || !SecIsSignActionView(view) || SecPlateIsCurrTaskVC(view)) {
         SecDeactivateClock();
         return NO;
     }
@@ -1538,45 +1544,21 @@ static id SecPatchClockInfo(id info) {
 }
 
 static void hook_setPunchData(id self, SEL _cmd, id data) {
+    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    IMP orig = v ? [v pointerValue] : NULL;
+
     if (g_enabled) {
         if (data) SecUpdateClockTargetFromObject(data, 0);
         SecUpdateClockTargetFromObject(self, 0);
-        if (g_clockTarget.count && [(id)self window]) {
-            SecPinClockView(self);
+        if (g_clockTarget.count && SecClockShouldPinView(self)) {
+            if ([(id)self window]) {
+                SecPinClockView(self);
+            }
             SecRefreshFakeLocation();
             SecPanelLog(@"考勤定位：%@", SecStationTitle(g_clockTarget));
         }
     }
-    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
-    if (!v) return;
-    IMP orig = [v pointerValue];
-    ((void (*)(id, SEL, id))orig)(self, _cmd, data);
-}
-
-static void hook_signActionWillMoveToWindow(id self, SEL _cmd, id newWindow) {
-    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
-    IMP orig = v ? [v pointerValue] : NULL;
-    if (orig) ((void (*)(id, SEL, id))orig)(self, _cmd, newWindow);
-    if (!g_enabled) return;
-    if (newWindow) {
-        SecUpdateClockTargetFromObject(self, 0);
-        if (g_clockTarget.count) {
-            SecPinClockView(self);
-            SecRefreshFakeLocation();
-        }
-    } else if (g_clockPinnedView == self || !g_clockPinnedView) {
-        SecDeactivateClock();
-    }
-}
-
-static void hook_signActionRemoveFromSuperview(id self, SEL _cmd) {
-    if (g_enabled && g_clockPinnedView == self) {
-        SecDeactivateClock();
-    }
-    NSValue *v = g_clockOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
-    if (!v) return;
-    IMP orig = [v pointerValue];
-    ((void (*)(id, SEL))orig)(self, _cmd);
+    if (orig) ((void (*)(id, SEL, id))orig)(self, _cmd, data);
 }
 
 static void hook_userClockWithInfo(id self, SEL _cmd, id info, id completion) {
@@ -1610,8 +1592,6 @@ static void SecInstallClockHooks(void) {
     Class signView = NSClassFromString(@"XPDSignActionView");
     if (signView) {
         SecHookClockSelector(signView, @selector(setPunchData:), (IMP)hook_setPunchData);
-        SecHookClockSelector(signView, @selector(willMoveToWindow:), (IMP)hook_signActionWillMoveToWindow);
-        SecHookClockSelector(signView, @selector(removeFromSuperview), (IMP)hook_signActionRemoveFromSuperview);
     }
 
     Class svc = NSClassFromString(@"XPDService");
@@ -2015,29 +1995,32 @@ static BOOL SecTryAutoFillPlateOnObject(id obj, BOOL allowRetry) {
 static void SecSchedulePlateAutoFill(id obj) {
     if (!g_licensed || !obj) return;
     __weak id weakObj = obj;
-    for (int attempt = 0; attempt < 4; attempt++) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.25 + attempt * 0.45) * NSEC_PER_SEC)),
+    for (int attempt = 0; attempt < 2; attempt++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.35 + attempt * 0.5) * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             SecTryAutoFillPlateOnObject(weakObj, NO);
         });
     }
 }
 
-static void (*orig_viewDidAppear)(id, SEL, BOOL);
-static void (*orig_viewWillAppear)(id, SEL, BOOL);
+static void (*orig_dispatchVehCheckAppear)(id, SEL, BOOL);
+static void (*orig_plateCameraAppear)(id, SEL, BOOL);
 
-static void hook_viewDidAppear(id self, SEL _cmd, BOOL animated) {
-    orig_viewDidAppear(self, _cmd, animated);
-    if (!g_licensed) return;
-    if (!SecObjectSupportsPlateScan(self)) return;
-    SecSchedulePlateAutoFill(self);
+static void hook_dispatchVehCheckAppear(id self, SEL _cmd, BOOL animated) {
+    orig_dispatchVehCheckAppear(self, _cmd, animated);
+    if (g_licensed) SecSchedulePlateAutoFill(self);
 }
 
-static void hook_viewWillAppear(id self, SEL _cmd, BOOL animated) {
-    orig_viewWillAppear(self, _cmd, animated);
-    if (!g_licensed) return;
-    if (!SecObjectSupportsPlateScan(self)) return;
-    SecSchedulePlateAutoFill(self);
+static void hook_plateCameraAppear(id self, SEL _cmd, BOOL animated) {
+    orig_plateCameraAppear(self, _cmd, animated);
+    if (g_licensed) SecSchedulePlateAutoFill(self);
+}
+
+static BOOL SecPlateHookClass(Class cls) {
+    NSString *cn = NSStringFromClass(cls);
+    if ([cn isEqualToString:@"XPDDispatchVehCheckVC"]) return YES;
+    if ([cn hasPrefix:@"WTPlate"]) return YES;
+    return NO;
 }
 
 typedef void (*SecScanBtnIMP)(id, SEL, id);
@@ -2085,18 +2068,24 @@ static void SecInstallPlateHooks(void) {
     static BOOL installed = NO;
     if (installed) return;
 
-    Method appear = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
-    if (appear) {
-        orig_viewDidAppear = (void (*)(id, SEL, BOOL))method_getImplementation(appear);
-        method_setImplementation(appear, (IMP)hook_viewDidAppear);
-        SecDebugLog(@"Hook UIViewController viewDidAppear:");
+    Class checkVC = NSClassFromString(@"XPDDispatchVehCheckVC");
+    if (checkVC) {
+        Method appear = class_getInstanceMethod(checkVC, @selector(viewDidAppear:));
+        if (appear) {
+            orig_dispatchVehCheckAppear = (void (*)(id, SEL, BOOL))method_getImplementation(appear);
+            method_setImplementation(appear, (IMP)hook_dispatchVehCheckAppear);
+            SecDebugLog(@"Hook XPDDispatchVehCheckVC viewDidAppear:");
+        }
     }
 
-    Method willAppear = class_getInstanceMethod([UIViewController class], @selector(viewWillAppear:));
-    if (willAppear) {
-        orig_viewWillAppear = (void (*)(id, SEL, BOOL))method_getImplementation(willAppear);
-        method_setImplementation(willAppear, (IMP)hook_viewWillAppear);
-        SecDebugLog(@"Hook UIViewController viewWillAppear:");
+    Class cameraVC = NSClassFromString(@"WTPlateIDCameraViewController");
+    if (cameraVC) {
+        Method appear = class_getInstanceMethod(cameraVC, @selector(viewDidAppear:));
+        if (appear) {
+            orig_plateCameraAppear = (void (*)(id, SEL, BOOL))method_getImplementation(appear);
+            method_setImplementation(appear, (IMP)hook_plateCameraAppear);
+            SecDebugLog(@"Hook WTPlateIDCameraViewController viewDidAppear:");
+        }
     }
 
     NSArray *scanSels = @[
@@ -2120,8 +2109,7 @@ static void SecInstallPlateHooks(void) {
 
     for (int i = 0; i < num; i++) {
         Class cls = classes[i];
-        const char *name = class_getName(cls);
-        if (strncmp(name, "XPD", 3) != 0 && strncmp(name, "WTPlate", 7) != 0) continue;
+        if (!SecPlateHookClass(cls)) continue;
 
         for (NSString *selName in scanSels) {
             SecHookScanSelector(cls, NSSelectorFromString(selName), (IMP)SecHookGenericScanAction);
