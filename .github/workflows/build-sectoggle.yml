@@ -23,9 +23,9 @@ jobs:
             -Wno-deprecated-declarations \
             -Wno-incompatible-function-pointer-types \
             -dynamiclib -fobjc-arc \
-            -framework UIKit -framework Foundation -framework CoreLocation \
+            -framework UIKit -framework Foundation -framework CoreLocation -framework Security \
             -install_name @executable_path/SecToggle.dylib \
-            -o SecToggle.dylib SecToggle.m \
+            -o SecToggle.dylib SecToggle.m SecLicenseCore.m SecDeviceID.m \
             -miphoneos-version-min=13.0 > build.log 2>&1; then
             echo "=== build failed ==="
             cat build.log

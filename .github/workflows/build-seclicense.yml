@@ -1,0 +1,27 @@
+name: Build SecLicense.ipa
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/SecLicense/**'
+      - '.github/workflows/build-seclicense.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build SecLicense.ipa
+        run: |
+          cd tools/SecLicense
+          chmod +x build_ipa.sh
+          ./build_ipa.sh
+          ls -la build/SecLicense.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SecLicense-ipa
+          path: tools/SecLicense/build/SecLicense.ipa
+          retention-days: 30
