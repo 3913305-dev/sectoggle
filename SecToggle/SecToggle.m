@@ -113,7 +113,7 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
     if ([name isEqualToString:@"(null)"] || [name isEqualToString:@"<null>"]) name = @"";
 
     if (zddm.length && !isnan(lon) && !isnan(lat) && (lon != 0 || lat != 0)) {
-        NSInteger queue = [ParseDouble(dict[@"n_queue"]) integerValue];
+        NSInteger queue = (NSInteger)ParseDouble(dict[@"n_queue"]);
         NSString *key = [NSString stringWithFormat:@"%@@%f,%f", zddm, lon, lat];
         BOOL exists = NO;
         for (NSMutableDictionary *s in g_stations) {
@@ -289,7 +289,7 @@ static id SecResolveDealTaskTarget(void) {
 
 static NSUInteger SecArgCountForSelector(SEL sel) {
     if (!sel) return 0;
-    return (NSUInteger)strchr(sel_getName(sel), ':') != NULL;
+    return strchr(sel_getName(sel), ':') != NULL;
 }
 
 static id SecKVCTry(id obj, NSString *key) {
