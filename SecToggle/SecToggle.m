@@ -15,7 +15,6 @@ static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
 static void SecInstallTapOpeInHooks(void);
 static void SecShowSimResult(NSString *msg);
-static NSDictionary *CurrentTarget(void);
 
 @interface SecToggleHandler : NSObject
 + (instancetype)shared;
@@ -166,6 +165,18 @@ static NSString *SecStationTitle(NSDictionary *t) {
     return @"未命名站点";
 }
 
+static NSDictionary *SpoofTarget(void) {
+    if (g_stations.count == 0) return nil;
+    if (g_enabled || g_simulatingAuto) {
+        return g_stations[g_stationIndex % g_stations.count];
+    }
+    return nil;
+}
+
+static NSDictionary *CurrentTarget(void) {
+    return SpoofTarget();
+}
+
 static NSString *SecPatchCoordField(NSString *raw, NSString *key, double value) {
     NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"?[0-9.eE+-]+\"?", key];
     NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
@@ -230,18 +241,6 @@ static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
 
 static NSString *PatchJson(NSString *raw) {
     return PatchJsonForRequest(raw, @"");
-}
-
-static NSDictionary *SpoofTarget(void) {
-    if (g_stations.count == 0) return nil;
-    if (g_enabled || g_simulatingAuto) {
-        return g_stations[g_stationIndex % g_stations.count];
-    }
-    return nil;
-}
-
-static NSDictionary *CurrentTarget(void) {
-    return SpoofTarget();
 }
 
 static void RefreshTarget(void) {
