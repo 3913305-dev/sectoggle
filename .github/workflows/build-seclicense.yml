@@ -15,10 +15,28 @@ jobs:
 
       - name: Build SecLicense.ipa
         run: |
-          cd tools/SecLicense
-          chmod +x build_ipa.sh
-          ./build_ipa.sh
-          ls -la build/SecLicense.ipa
+          set -e
+          ROOT="tools/SecLicense"
+          APP_DIR="$ROOT/SecLicenseApp"
+          BUILD="$ROOT/build"
+          PAYLOAD="$BUILD/Payload/SecLicense.app"
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          rm -rf "$BUILD"
+          mkdir -p "$PAYLOAD"
+          xcrun -sdk iphoneos clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=13.0 \
+            -fobjc-arc -Wno-deprecated-declarations \
+            -framework UIKit -framework Foundation -framework Security \
+            -o "$PAYLOAD/SecLicense" \
+            "$APP_DIR/main.m" \
+            "$APP_DIR/AppDelegate.m" \
+            "$APP_DIR/ViewController.m" \
+            "$APP_DIR/SecDeviceID.m" \
+            "$APP_DIR/SecLicenseCore.m"
+          cp "$APP_DIR/Info.plist" "$PAYLOAD/Info.plist"
+          cd "$BUILD"
+          zip -qr SecLicense.ipa Payload
+          ls -la SecLicense.ipa
+          file "$PAYLOAD/SecLicense"
 
       - uses: actions/upload-artifact@v4
         with:

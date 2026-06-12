@@ -51,7 +51,10 @@ NSString *SecLicenseDeviceCodeShort(NSString *uuid) {
     for (int i = 0; i < 6; i++) {
         [hex appendFormat:@"%02X", digest[i]];
     }
-    return SecLicenseFormatGroups(hex);
+    return [NSString stringWithFormat:@"%@-%@-%@",
+            [hex substringWithRange:NSMakeRange(0, 4)],
+            [hex substringWithRange:NSMakeRange(4, 4)],
+            [hex substringWithRange:NSMakeRange(8, 4)]];
 }
 
 NSString *SecLicenseGenerateCode(NSString *uuid, NSString *secret) {
