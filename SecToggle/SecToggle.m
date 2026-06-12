@@ -15,6 +15,7 @@ static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
 static void SecInstallTapOpeInHooks(void);
 static void SecShowSimResult(NSString *msg);
+static void SecSimulateAutoArriveImpl(void);
 
 @interface SecToggleHandler : NSObject
 + (instancetype)shared;
@@ -475,7 +476,7 @@ static void SecCollectTaskIdsFromObject(id obj) {
     }
 }
 
-static void SecCollectTaskIdsFromUI(void) {
+static void SecPrefetchFromTaskPage(void) {
     if (g_dealTaskTarget) {
         SecCollectTaskIdsFromObject(g_dealTaskTarget);
     }
@@ -490,6 +491,10 @@ static void SecCollectTaskIdsFromUI(void) {
             if (g_taskBcdh.length && g_taskBcmxdh.length && g_dealTaskTarget) break;
         }
     });
+}
+
+static void SecCollectTaskIdsFromUI(void) {
+    SecPrefetchFromTaskPage();
 }
 
 static BOOL SecZddmMatches(id obj, NSString *wantZddm) {
@@ -508,25 +513,6 @@ static id SecFindAutoStayedTarget(void) {
             return obj;
         }
     }
-
-    __block id found = nil;
-    SecForEachWindow(^(UIWindow *win) {
-        if (found) return;
-        for (UIViewController *vc = SecTopViewController(win.rootViewController); vc; vc = vc.parentViewController) {
-            if ([vc respondsToSelector:stayedSel] && SecZddmMatches(vc, wantZddm)) {
-                found = vc;
-                return;
-            }
-            for (NSString *key in @[@"service", @"_service"]) {
-                id svc = SecKVCTry(vc, key);
-                if (svc && [svc respondsToSelector:stayedSel] && SecZddmMatches(svc, wantZddm)) {
-                    found = svc;
-                    return;
-                }
-            }
-        }
-    });
-    if (found) return found;
 
     Class mgrCls = NSClassFromString(@"AMapGeoFenceManager");
     SEL sharedSel = @selector(sharedGeoFence);
@@ -644,7 +630,15 @@ static void SecTriggerAMapGeoFenceStayed(void) {
 }
 
 static NSInteger SecDirectDealTask(void) {
+    if (!g_taskBcmxdh.length) {
+        SecPrefetchFromTaskPage();
+    }
+
     id target = SecResolveDealTaskTarget();
+    if (!target) {
+        SecPrefetchFromTaskPage();
+        target = SecResolveDealTaskTarget();
+    }
     if (!target) {
         NSLog(@"[SecToggle] 无 dealTask 目标");
         return 0;
@@ -653,9 +647,8 @@ static NSInteger SecDirectDealTask(void) {
     NSDictionary *t = DisplayStation();
     if (!t) return 0;
 
-    SecCollectTaskIdsFromUI();
     if (!g_taskBcmxdh.length) {
-        NSLog(@"[SecToggle] 缺少 bcmxdh");
+        NSLog(@"[SecToggle] 缺少 bcmxdh（请打开任务详情等接口返回）");
         return 0;
     }
 
@@ -715,6 +708,41 @@ static void SecShowSimResult(NSString *msg) {
                           title, msg];
 }
 
+static void SecSimulateAutoArriveImpl(void) {
+    NSDictionary *t = DisplayStation();
+    NSLog(@"[SecToggle] 模拟自动到达 → %@ wd=%f jd=%f",
+          SecStationTitle(t), [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]);
+
+    g_simulatingAuto = YES;
+    g_forceAutoCzlx = YES;
+
+    NSInteger n = SecDirectDealTask();
+    if (n == 0) {
+        n = SecTriggerAutoStayedOnce();
+    }
+
+    if (n == 0) {
+        SecClearSimFlags();
+        id target = g_dealTaskTarget;
+        if (!target) {
+            SecShowSimResult(@"无 service，请打开当前任务页");
+        } else if (!g_taskBcmxdh.length) {
+            SecShowSimResult(@"缺少 bcmxdh，请刷新任务页");
+        } else {
+            SecShowSimResult(@"未找到 Stayed，请留任务页等围栏");
+        }
+        NSLog(@"[SecToggle] 模拟失败 service=%@ bcmxdh=%@ zddm=%@",
+              target ? [target class] : nil, g_taskBcmxdh, t[@"zddm"]);
+    } else {
+        SecScheduleClearSimFlags();
+        if (g_lastDealType.length) {
+            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", g_lastDealType]);
+        } else {
+            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", SecAutoDealType()]);
+        }
+    }
+}
+
 static void SecSimulateAutoArrive(void) {
     if (!g_stations.count) {
         SecShowSimResult(@"请先打开任务详情");
@@ -733,42 +761,10 @@ static void SecSimulateAutoArrive(void) {
     }
     g_lastSimTime = now;
 
-    NSDictionary *t = DisplayStation();
-    NSLog(@"[SecToggle] 模拟自动到达 → %@ wd=%f jd=%f",
-          SecStationTitle(t), [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]);
-
-    SecInstallDealTaskHooks();
-    SecInstallStayedHooks();
-    SecCollectTaskIdsFromUI();
-
-    g_simulatingAuto = YES;
-    g_forceAutoCzlx = YES;
-
-    NSInteger n = SecDirectDealTask();
-    if (n == 0) {
-        n = SecTriggerAutoStayedOnce();
-    }
-
-    if (n == 0) {
-        SecClearSimFlags();
-        id target = SecResolveDealTaskTarget();
-        if (!target) {
-            SecShowSimResult(@"无 service，请打开当前任务页");
-        } else if (!g_taskBcmxdh.length) {
-            SecShowSimResult(@"缺少 bcmxdh，请刷新任务页");
-        } else {
-            SecShowSimResult(@"未找到 Stayed，请开关ON留任务页等围栏");
-        }
-        NSLog(@"[SecToggle] 模拟失败 service=%@ bcmxdh=%@ zddm=%@",
-              target ? [target class] : nil, g_taskBcmxdh, t[@"zddm"]);
-    } else {
-        SecScheduleClearSimFlags();
-        if (g_lastDealType.length) {
-            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", g_lastDealType]);
-        } else {
-            SecShowSimResult([NSString stringWithFormat:@"已触发自动 czlx=%@", SecAutoDealType()]);
-        }
-    }
+    SecShowSimResult(@"模拟中…");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SecSimulateAutoArriveImpl();
+    });
 }
 
 #pragma mark - dealTask 日志
@@ -946,7 +942,7 @@ static void SecCreatePanel(void) {
     NSLog(@"[SecToggle] 开关 %@", g_enabled ? @"ON" : @"OFF");
     SecUpdateStatusLabel();
     if (g_enabled) {
-        SecCollectTaskIdsFromUI();
+        SecPrefetchFromTaskPage();
         if (g_dealTaskTarget) NSLog(@"[SecToggle] 已缓存 service");
         if (g_taskBcmxdh.length) NSLog(@"[SecToggle] bcmxdh %@", g_taskBcmxdh);
     }
