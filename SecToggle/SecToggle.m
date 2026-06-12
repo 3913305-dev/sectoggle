@@ -281,15 +281,10 @@ void SecUpdateStatusLabel(void) {
         return;
     }
     NSString *title = SecStationTitle(t);
-    NSString *zddm = [t[@"zddm"] description];
-    NSString *dealHint = g_lastDealType.length ?
-        [NSString stringWithFormat:@" | dealType=%@", g_lastDealType] : @"";
-    g_statusLabel.text = [NSString stringWithFormat:@"[%@] %ld/%lu %@%@\n%@\nwd=%.6f  jd=%.6f",
+    g_statusLabel.text = [NSString stringWithFormat:@"[%@] %ld/%lu\n%@",
                           g_enabled ? @"ON" : @"OFF",
                           (long)(g_stationIndex + 1), (unsigned long)g_stations.count,
-                          title, dealHint,
-                          zddm.length ? [NSString stringWithFormat:@"代码: %@", zddm] : @"",
-                          [t[@"wd"] doubleValue], [t[@"jd"] doubleValue]];
+                          title];
 }
 
 static void SecCreatePanel(void) {
@@ -305,7 +300,7 @@ static void SecCreatePanel(void) {
         return;
     }
 
-    CGFloat pw = 280, ph = 158;
+    CGFloat pw = 280, ph = 148;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(20, 120, pw, ph)];
     g_panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
     g_panel.layer.cornerRadius = 10;
@@ -321,7 +316,7 @@ static void SecCreatePanel(void) {
     [sw addTarget:[SecToggleHandler shared] action:@selector(onToggle:) forControlEvents:UIControlEventValueChanged];
     [g_panel addSubview:sw];
 
-    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 28, pw - 16, 54)];
+    g_statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 30, pw - 16, 42)];
     g_statusLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
     g_statusLabel.font = [UIFont systemFontOfSize:11];
     g_statusLabel.numberOfLines = 0;
@@ -329,7 +324,7 @@ static void SecCreatePanel(void) {
     [g_panel addSubview:g_statusLabel];
 
     UIButton *btnNext = [UIButton buttonWithType:UIButtonTypeSystem];
-    btnNext.frame = CGRectMake(8, 96, 120, 34);
+    btnNext.frame = CGRectMake(8, 88, 120, 34);
     [btnNext setTitle:@"下一站" forState:UIControlStateNormal];
     [btnNext setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     btnNext.backgroundColor = [UIColor colorWithRed:0.2 green:0.45 blue:0.85 alpha:1];
@@ -338,7 +333,7 @@ static void SecCreatePanel(void) {
     [g_panel addSubview:btnNext];
 
     UIButton *btnAuto = [UIButton buttonWithType:UIButtonTypeSystem];
-    btnAuto.frame = CGRectMake(136, 96, 136, 34);
+    btnAuto.frame = CGRectMake(136, 88, 136, 34);
     [btnAuto setTitle:@"模拟自动到达" forState:UIControlStateNormal];
     [btnAuto setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     btnAuto.backgroundColor = [UIColor colorWithRed:0.72 green:0.38 blue:0.05 alpha:1];
