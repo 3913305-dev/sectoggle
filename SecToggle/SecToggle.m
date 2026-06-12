@@ -13,6 +13,8 @@
 void SecUpdateStatusLabel(void);
 static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
+static void SecInstallTapOpeInHooks(void);
+static void SecShowSimResult(NSString *msg);
 
 @interface SecToggleHandler : NSObject
 + (instancetype)shared;
@@ -31,6 +33,8 @@ static UIView *g_panel = nil;
 static UILabel *g_statusLabel = nil;
 static NSString *g_lastDealType = nil;
 static NSString *g_lastDealClass = nil;
+static id g_dealTaskTarget = nil;
+static id g_cachedAutoDealType = nil;
 static BOOL g_simulatingAuto = NO;
 static NSHashTable *g_stayedTargets = nil;
 static NSHashTable *g_siteTargets = nil;
@@ -153,7 +157,7 @@ static BOOL SecClassMatches(id obj) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         prefixes = @[@"XPDSite", @"XPDNewSite", @"XPDCurrTask", @"XPDTaskDetail",
-                     @"XPDStation", @"XPDArrive", @"XPDTaskOperator"];
+                     @"XPDStation", @"XPDArrive", @"XPDTaskOperator", @"XPDService"];
     });
     for (NSString *p in prefixes) {
         if ([cn hasPrefix:p]) return YES;
@@ -161,12 +165,52 @@ static BOOL SecClassMatches(id obj) {
     return NO;
 }
 
-static NSInteger SecInvokeSelector(id obj, SEL sel) {
+static NSUInteger SecArgCountForSelector(SEL sel) {
+    if (!sel) return 0;
+    return (NSUInteger)strchr(sel_getName(sel), ':') != NULL;
+}
+
+static id SecKVCTry(id obj, NSString *key) {
+    if (!obj || !key.length) return nil;
+    @try { return [obj valueForKey:key]; } @catch (NSException *e) { return nil; }
+}
+
+static NSString *SecStringFromKV(id obj, NSArray *keys) {
+    for (NSString *k in keys) {
+        id v = SecKVCTry(obj, k);
+        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) return v;
+        if ([v isKindOfClass:[NSNumber class]]) return [v stringValue];
+    }
+    return nil;
+}
+
+static void SecForEachWindow(void (^block)(UIWindow *win)) {
+    if (!block) return;
+    UIApplication *app = [UIApplication sharedApplication];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in app.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *win in [(UIWindowScene *)scene windows]) {
+                if (win && !win.hidden) block(win);
+            }
+        }
+    }
+    for (UIWindow *win in app.windows) {
+        if (win && !win.hidden) block(win);
+    }
+}
+
+static NSInteger SecInvokeSelectorWithArg(id obj, SEL sel, id arg) {
     if (!obj || !sel || ![obj respondsToSelector:sel]) return 0;
     @try {
+        NSUInteger argc = SecArgCountForSelector(sel);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        ((void (*)(id, SEL))objc_msgSend)(obj, sel);
+        if (argc == 0) {
+            ((void (*)(id, SEL))objc_msgSend)(obj, sel);
+        } else {
+            ((void (*)(id, SEL, id))objc_msgSend)(obj, sel, arg ?: nil);
+        }
 #pragma clang diagnostic pop
         NSLog(@"[SecToggle] 已触发 %@ ← %@", NSStringFromSelector(sel), [obj class]);
         if (g_siteTargets && SecClassMatches(obj)) {
@@ -179,55 +223,112 @@ static NSInteger SecInvokeSelector(id obj, SEL sel) {
     }
 }
 
-static void SecWalkTrigger(id node, SEL sel, NSInteger *count, NSMutableSet *seen) {
-    if (!node) return;
+static NSInteger SecInvokeSelector(id obj, SEL sel) {
+    return SecInvokeSelectorWithArg(obj, sel, nil);
+}
+
+static NSInteger SecTapOpeInOnObject(id obj) {
+    if (!obj) return 0;
+    if (g_siteTargets && SecClassMatches(obj)) [g_siteTargets addObject:obj];
+
+    NSArray *imgKeys = @[@"opeInImg", @"_opeInImg", @"siteOpenImg", @"_siteOpenImg", @"openImg", @"_openImg"];
+    for (NSString *key in imgKeys) {
+        id v = SecKVCTry(obj, key);
+        if ([v isKindOfClass:[UIControl class]]) {
+            [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+            NSLog(@"[SecToggle] 点击 %@ ← %@", key, [obj class]);
+            return 1;
+        }
+    }
+    return SecInvokeSelectorWithArg(obj, @selector(tapOpeIn:), SecKVCTry(obj, @"opeInImg") ?: SecKVCTry(obj, @"_opeInImg"));
+}
+
+static void SecWalkCollect(id node, void (^visit)(id), NSMutableSet *seen) {
+    if (!node || !visit) return;
     NSValue *key = [NSValue valueWithNonretainedObject:node];
     if ([seen containsObject:key]) return;
     [seen addObject:key];
 
-    if ([node respondsToSelector:sel]) {
-        *count += SecInvokeSelector(node, sel);
-    }
-
+    visit(node);
     if ([node isKindOfClass:[UIView class]]) {
         for (UIView *sub in [(UIView *)node subviews]) {
-            SecWalkTrigger(sub, sel, count, seen);
+            SecWalkCollect(sub, visit, seen);
         }
     }
-    SecWalkTrigger([node nextResponder], sel, count, seen);
+    SecWalkCollect([node nextResponder], visit, seen);
 }
 
-static NSInteger SecTriggerInWindows(SEL sel) {
-    NSInteger count = 0;
+static void SecWalkWindows(void (^visit)(id)) {
+    if (!visit) return;
     NSMutableSet *seen = [NSMutableSet set];
-    for (UIWindow *win in [UIApplication sharedApplication].windows) {
-        SecWalkTrigger(win, sel, &count, seen);
-        SecWalkTrigger(win.rootViewController, sel, &count, seen);
-        if (win.rootViewController.presentedViewController) {
-            SecWalkTrigger(win.rootViewController.presentedViewController, sel, &count, seen);
-        }
-    }
+    SecForEachWindow(^(UIWindow *win) {
+        SecWalkCollect(win, visit, seen);
+        SecWalkCollect(win.rootViewController, visit, seen);
+        SecWalkCollect(win.rootViewController.presentedViewController, visit, seen);
+    });
+}
+
+static NSInteger SecTriggerSiteActions(void) {
+    __block NSInteger count = 0;
+    SecWalkWindows(^(id node) {
+        if (!SecClassMatches(node)) return;
+        count += SecTapOpeInOnObject(node);
+        count += SecInvokeSelectorWithArg(node, @selector(handleWhenStayedTimerFired:), nil);
+        count += SecInvokeSelector(node, @selector(startStayedTimer));
+        count += SecInvokeSelectorWithArg(node, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
+    });
     return count;
 }
 
 static NSInteger SecTriggerCachedTargets(void) {
     NSInteger count = 0;
     for (id obj in g_stayedTargets) {
-        count += SecInvokeSelector(obj, @selector(handleWhenStayedTimerFired:));
-        count += SecInvokeSelector(obj, @selector(amapGeoFenceRegionStatusDidChangedToStayed:));
+        count += SecInvokeSelector(obj, @selector(startStayedTimer));
+        count += SecInvokeSelectorWithArg(obj, @selector(handleWhenStayedTimerFired:), nil);
+        count += SecInvokeSelectorWithArg(obj, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
     }
     for (id obj in g_siteTargets) {
-        count += SecInvokeSelector(obj, @selector(tapOpeIn:));
-        count += SecInvokeSelector(obj, @selector(handleWhenStayedTimerFired:));
+        count += SecTapOpeInOnObject(obj);
+        count += SecInvokeSelectorWithArg(obj, @selector(handleWhenStayedTimerFired:), nil);
     }
     return count;
 }
 
-static void (*orig_stayedFired)(id, SEL);
+static void (*orig_stayedFired)(id, SEL, id);
+static void (*orig_tapOpeIn)(id, SEL, id);
 
-static void hook_stayedFired(id self, SEL _cmd) {
+static void hook_stayedFired(id self, SEL _cmd, id timer) {
     if (g_stayedTargets) [g_stayedTargets addObject:self];
-    orig_stayedFired(self, _cmd);
+    if (g_siteTargets && SecClassMatches(self)) [g_siteTargets addObject:self];
+    orig_stayedFired(self, _cmd, timer);
+}
+
+static void hook_tapOpeIn(id self, SEL _cmd, id sender) {
+    if (g_siteTargets && SecClassMatches(self)) [g_siteTargets addObject:self];
+    orig_tapOpeIn(self, _cmd, sender);
+}
+
+static void SecInstallTapOpeInHooks(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+
+    SEL sel = @selector(tapOpeIn:);
+    int num = objc_getClassList(NULL, 0);
+    if (num <= 0) return;
+    Class *classes = (Class *)malloc((size_t)num * sizeof(Class));
+    if (!classes) return;
+    objc_getClassList(classes, num);
+
+    for (int i = 0; i < num; i++) {
+        Method m = class_getInstanceMethod(classes[i], sel);
+        if (!m) continue;
+        orig_tapOpeIn = (void (*)(id, SEL, id))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_tapOpeIn);
+        NSLog(@"[SecToggle] Hook tapOpeIn ← %@", NSStringFromClass(classes[i]));
+        installed = YES;
+        break;
+    }
+    free(classes);
 }
 
 static void SecInstallStayedHooks(void) {
@@ -244,7 +345,7 @@ static void SecInstallStayedHooks(void) {
     for (int i = 0; i < num; i++) {
         Method m = class_getInstanceMethod(classes[i], sel);
         if (!m) continue;
-        orig_stayedFired = (void (*)(id, SEL))method_getImplementation(m);
+        orig_stayedFired = (void (*)(id, SEL, id))method_getImplementation(m);
         method_setImplementation(m, (IMP)hook_stayedFired);
         NSLog(@"[SecToggle] Hook handleWhenStayedTimerFired ← %@", NSStringFromClass(classes[i]));
         installed = YES;
@@ -263,16 +364,66 @@ static void SecTriggerAMapGeoFenceStayed(void) {
     id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, sharedSel);
     if (!mgr) return;
 
-    SecInvokeSelector(mgr, @selector(amapGeoFenceRegionStatusDidChangedToStayed:));
+    SecInvokeSelectorWithArg(mgr, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
 
     id delegate = nil;
     if ([mgr respondsToSelector:@selector(delegate)]) {
         delegate = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(delegate));
     }
     if (delegate) {
-        SecInvokeSelector(delegate, @selector(amapGeoFenceRegionStatusDidChangedToStayed:));
-        SecInvokeSelector(delegate, @selector(handleWhenStayedTimerFired:));
-        SecInvokeSelector(delegate, @selector(tapOpeIn:));
+        if (g_stayedTargets) [g_stayedTargets addObject:delegate];
+        SecInvokeSelector(delegate, @selector(startStayedTimer));
+        SecInvokeSelectorWithArg(delegate, @selector(amapGeoFenceRegionStatusDidChangedToStayed:), nil);
+        SecInvokeSelectorWithArg(delegate, @selector(handleWhenStayedTimerFired:), nil);
+        SecTapOpeInOnObject(delegate);
+    }
+}
+
+static NSInteger SecDirectDealTask(void) {
+    if (!g_dealTaskTarget) return 0;
+    NSDictionary *t = DisplayStation();
+    if (!t) return 0;
+
+    __block NSString *bcdh = nil;
+    __block NSString *bcmxdh = nil;
+    SecWalkWindows(^(id node) {
+        if (bcdh.length && bcmxdh.length) return;
+        if (!SecClassMatches(node)) return;
+        if (!bcdh.length) bcdh = SecStringFromKV(node, @[@"n_bcdh", @"bcdh", @"_n_bcdh", @"_bcdh"]);
+        if (!bcmxdh.length) bcmxdh = SecStringFromKV(node, @[@"n_bcmxdh", @"bcmxdh", @"_n_bcmxdh"]);
+    });
+
+    NSString *zddm = [t[@"zddm"] description];
+    NSNumber *lat = @([t[@"wd"] doubleValue]);
+    NSNumber *lon = @([t[@"jd"] doubleValue]);
+    NSNumber *fjsj = @((NSInteger)([[NSDate date] timeIntervalSince1970] * 1000));
+    id dealType = g_cachedAutoDealType ?: @1;
+
+    SEL sel = @selector(dealTaskWithBCDH:bcmxdh:zddm:lat:lon:fjsj:dealType:completion:);
+    if (![g_dealTaskTarget respondsToSelector:sel]) return 0;
+
+    void (^completion)(id, NSError *) = ^(id resp, NSError *err) {
+        NSLog(@"[SecToggle] dealTask 回调 err=%@ resp=%@", err, resp);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *tip = err ? [NSString stringWithFormat:@"dealTask 失败: %@", err.localizedDescription] :
+                @"dealTask 已请求";
+            SecShowSimResult(tip);
+        });
+    };
+
+    @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        ((void (*)(id, SEL, id, id, id, id, id, id, id, id))objc_msgSend)(
+            g_dealTaskTarget, sel,
+            bcdh ?: @"", bcmxdh ?: @"", zddm ?: @"", lat, lon, fjsj, dealType, completion);
+#pragma clang diagnostic pop
+        NSLog(@"[SecToggle] 直接 dealTask bcdh=%@ bcmxdh=%@ zddm=%@ dealType=%@",
+              bcdh, bcmxdh, zddm, dealType);
+        return 1;
+    } @catch (NSException *e) {
+        NSLog(@"[SecToggle] 直接 dealTask 异常: %@", e);
+        return 0;
     }
 }
 
@@ -303,26 +454,25 @@ static void SecSimulateAutoArrive(void) {
 
     SecInstallDealTaskHooks();
     SecInstallStayedHooks();
+    SecInstallTapOpeInHooks();
 
     g_simulatingAuto = YES;
 
     NSInteger n = 0;
     n += SecTriggerCachedTargets();
-    n += SecTriggerInWindows(@selector(tapOpeIn:));
-    n += SecTriggerInWindows(@selector(handleWhenStayedTimerFired:));
-    n += SecTriggerInWindows(@selector(amapGeoFenceRegionStatusDidChangedToStayed:));
+    n += SecTriggerSiteActions();
     SecTriggerAMapGeoFenceStayed();
+    if (g_dealTaskTarget) {
+        n += SecDirectDealTask();
+    }
 
     g_simulatingAuto = NO;
 
     if (n == 0) {
         SecShowSimResult(@"未找到站点控件，请打开当前任务页");
         NSLog(@"[SecToggle] 未找到 tapOpeIn / Stayed 目标");
-    } else {
-        NSString *msg = g_lastDealType.length ?
-            [NSString stringWithFormat:@"已触发 %ld 次 dealType=%@", (long)n, g_lastDealType] :
-            [NSString stringWithFormat:@"已触发 %ld 次", (long)n];
-        SecShowSimResult(msg);
+    } else if (!g_lastDealType.length) {
+        SecShowSimResult([NSString stringWithFormat:@"已触发 %ld 次", (long)n]);
         NSLog(@"[SecToggle] 模拟完成，触发 %ld 次", (long)n);
     }
 }
@@ -333,11 +483,20 @@ static void (*orig_dealTask)(id, SEL, id, id, id, id, id, id, id, id);
 
 static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
                           id lat, id lon, id fjsj, id dealType, id completion) {
+    g_dealTaskTarget = self;
     g_lastDealType = [dealType description];
     g_lastDealClass = NSStringFromClass([self class]);
+    if (g_lastDealType.length && ![g_lastDealType isEqualToString:@"0"]) {
+        g_cachedAutoDealType = dealType;
+    }
     NSLog(@"[SecToggle] dealTask class=%@ zddm=%@ dealType=%@ lat=%@ lon=%@",
           g_lastDealClass, zddm, dealType, lat, lon);
     orig_dealTask(self, _cmd, bcdh, bcmxdh, zddm, lat, lon, fjsj, dealType, completion);
+    if (g_simulatingAuto) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SecShowSimResult([NSString stringWithFormat:@"dealType=%@", g_lastDealType]);
+        });
+    }
 }
 
 static void SecInstallDealTaskHooks(void) {
@@ -550,6 +709,7 @@ static void SecInstallHooks(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         SecInstallDealTaskHooks();
         SecInstallStayedHooks();
+        SecInstallTapOpeInHooks();
     });
 
     NSLog(@"[SecToggle] Hooks 安装完成");
