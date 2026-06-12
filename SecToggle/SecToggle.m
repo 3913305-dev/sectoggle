@@ -19,6 +19,7 @@ static void SecSortStations(void);
 static void SecInstallDealTaskHooks(void);
 static void SecInstallStayedHooks(void);
 static void SecInstallPlateHooks(void);
+static void SecInstallSigninHooks(void);
 static void SecPanelLog(NSString *format, ...);
 static void SecDebugLog(NSString *format, ...);
 static NSString *SecStationTitle(NSDictionary *t);
@@ -43,10 +44,14 @@ static BOOL SecDictIndicatesArrived(NSDictionary *dict);
 static BOOL SecStationIsArrived(NSDictionary *s);
 static void SecMarkStationArrived(NSDictionary *s);
 static NSInteger SecEarliestPendingStationIndex(void);
+static void SecEnsurePendingSelection(void);
+static NSUInteger SecCountPendingStations(void);
 static BOOL SecActiveGpsCoords(double *outLat, double *outLon);
 static BOOL SecResolveSpoofCoords(double *outLat, double *outLon);
 static BOOL SecShouldPatchRequestURL(NSString *url);
 static BOOL SecBodyLooksLikeGps(NSString *raw);
+static id SecKVCTry(id obj, NSString *key);
+static NSString *SecStringFromKV(id obj, NSArray *keys);
 static void SecEnsureUI(void);
 static void SecSetPanelVisible(BOOL visible);
 static void SecUpdateLicenseUI(void);
@@ -237,8 +242,14 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
         if (changed) {
             SecSortStations();
             if (!g_selectedZddm.length && g_stations.count) {
-                g_stationIndex = 0;
-                g_selectedZddm = [g_stations[0][@"zddm"] description];
+                NSInteger pending = SecEarliestPendingStationIndex();
+                if (pending >= 0) {
+                    g_stationIndex = pending;
+                    g_selectedZddm = [g_stations[pending][@"zddm"] description];
+                } else {
+                    g_stationIndex = 0;
+                    g_selectedZddm = [g_stations[0][@"zddm"] description];
+                }
             } else {
                 for (NSUInteger i = 0; i < g_stations.count; i++) {
                     if ([g_stations[i][@"zddm"] isEqualToString:g_selectedZddm]) {
@@ -246,6 +257,7 @@ static void ExtractStationsFromObject(id obj, NSInteger depth) {
                         break;
                     }
                 }
+                SecEnsurePendingSelection();
             }
             dispatch_async(dispatch_get_main_queue(), ^{
                 SecUpdateStatusLabel();
@@ -278,7 +290,42 @@ static NSDictionary *SecStationForZddm(id zddmObj) {
 static void SecSetActionZddm(NSString *zddm) {
     if (!zddm.length) return;
     g_actionZddm = [zddm copy];
-    g_actionZddmUntil = [[NSDate date] timeIntervalSince1970] + 10.0;
+    g_actionZddmUntil = [[NSDate date] timeIntervalSince1970] + 30.0;
+}
+
+static NSDictionary *SecFindActionStationInObject(id obj, NSInteger depth) {
+    if (!obj || depth > 8) return nil;
+    NSDictionary *s = SecStationForZddm(SecKVCTry(obj, @"zddm"));
+    if (!s) s = SecStationForZddm(SecKVCTry(obj, @"c_zddm"));
+    if (!s) s = SecStationForZddm(SecStringFromKV(obj, @[@"c_zddm", @"zddm", @"n_zddm"]));
+    if (s) return s;
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        s = SecStationForZddm(((NSDictionary *)obj)[@"c_zddm"] ?: ((NSDictionary *)obj)[@"zddm"]);
+        if (s) return s;
+    }
+    for (NSString *k in @[
+        @"model", @"task", @"taskModel", @"station", @"site", @"currStation",
+        @"siteModel", @"selectStation", @"stationModel", @"zdModel", @"siteInfo"
+    ]) {
+        s = SecFindActionStationInObject(SecKVCTry(obj, k), depth + 1);
+        if (s) return s;
+    }
+    return nil;
+}
+
+static BOOL SecBindActionStationFromObject(id obj) {
+    NSDictionary *s = SecFindActionStationInObject(obj, 0);
+    if (!s) return NO;
+    SecSetActionZddm([s[@"zddm"] description]);
+    SecRefreshFakeLocation();
+    return YES;
+}
+
+static BOOL SecShouldUseExactCoords(void) {
+    if (g_actionZddm.length && [[NSDate date] timeIntervalSince1970] < g_actionZddmUntil) return YES;
+    if (g_enabled && !g_autoMode) return YES;
+    if (g_routeActive && g_routeFinished) return YES;
+    return NO;
 }
 
 static NSString *SecExtractZddmFromJson(NSString *raw) {
@@ -364,7 +411,8 @@ static BOOL SecDictIndicatesArrived(NSDictionary *dict) {
         if (!s.length || [s isEqualToString:@"(null)"]) continue;
         if ([s isEqualToString:@"2"] || [s isEqualToString:@"3"] || [s isEqualToString:@"9"] ||
             [s isEqualToString:@"Y"] || [s isEqualToString:@"y"]) return YES;
-        if ([s containsString:@"已到"] || [s containsString:@"到达"] || [s containsString:@"完成"]) return YES;
+        if ([s containsString:@"已到"] || [s containsString:@"到达"] || [s containsString:@"完成"] ||
+            [s containsString:@"入局"] || [s containsString:@"入站"]) return YES;
         NSInteger n = [s integerValue];
         if (n >= 2 && n <= 5) return YES;
     }
@@ -386,6 +434,30 @@ static void SecMarkStationArrived(NSDictionary *s) {
     [g_arrivedZddms addObject:zddm];
     for (NSMutableDictionary *st in g_stations) {
         if ([st[@"zddm"] isEqualToString:zddm]) st[@"arrived"] = @YES;
+    }
+    SecEnsurePendingSelection();
+}
+
+static NSUInteger SecCountPendingStations(void) {
+    NSUInteger n = 0;
+    for (NSDictionary *s in g_stations) {
+        if (!SecStationIsArrived(s)) n++;
+    }
+    return n;
+}
+
+static void SecEnsurePendingSelection(void) {
+    if (g_stations.count == 0) return;
+    NSInteger idx = SecIndexForZddm(g_selectedZddm);
+    if (idx < 0) idx = g_stationIndex;
+    if (idx >= 0 && idx < (NSInteger)g_stations.count && !SecStationIsArrived(g_stations[idx])) {
+        g_stationIndex = idx;
+        return;
+    }
+    NSInteger pending = SecEarliestPendingStationIndex();
+    if (pending >= 0) {
+        g_stationIndex = pending;
+        g_selectedZddm = [g_stations[pending][@"zddm"] description];
     }
 }
 
@@ -433,7 +505,7 @@ static NSDictionary *CurrentTarget(void) {
 }
 
 static BOOL SecShouldJitterGps(void) {
-    return g_enabled;
+    return g_enabled && g_autoMode && g_routeActive && !g_routeFinished && !SecShouldUseExactCoords();
 }
 
 static void SecSpoofedCoords(NSDictionary *t, double *outLat, double *outLon, BOOL jitter) {
@@ -646,7 +718,7 @@ static BOOL SecActiveGpsCoords(double *outLat, double *outLon) {
         if (g_routeFinished) {
             NSDictionary *t = RouteDestStation();
             if (t) {
-                SecSpoofedCoords(t, outLat, outLon, YES);
+                SecSpoofedCoords(t, outLat, outLon, NO);
                 return YES;
             }
         }
@@ -657,7 +729,7 @@ static BOOL SecActiveGpsCoords(double *outLat, double *outLon) {
 
     NSDictionary *t = SpoofTarget();
     if (!t) return NO;
-    SecSpoofedCoords(t, outLat, outLon, SecShouldJitterGps());
+    SecSpoofedCoords(t, outLat, outLon, !SecShouldUseExactCoords() && SecShouldJitterGps());
     return YES;
 }
 
@@ -694,7 +766,7 @@ static BOOL SecShouldPatchRequestURL(NSString *url) {
     dispatch_once(&onceToken, ^{
         keys = @[
             @"car/", @"rwcz", @"location", @"withGPS", @"withgps",
-            @"gps", @"track", @"position", @"trajectory", @"driver"
+            @"gps", @"track", @"position", @"trajectory", @"driver", @"/qd"
         ];
     });
     for (NSString *k in keys) {
@@ -1101,6 +1173,152 @@ static void SecInstallDealTaskHooks(void) {
         installed = YES;
     }
     free(classes);
+}
+
+#pragma mark - 签到 Hook
+
+static NSMutableDictionary *g_signinOrigIMPs = nil;
+
+static void SecHookSigninSelector(Class cls, SEL sel, IMP hookImp) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    IMP orig = method_getImplementation(m);
+    if (orig == hookImp) return;
+    if (!g_signinOrigIMPs) g_signinOrigIMPs = [NSMutableDictionary dictionary];
+    g_signinOrigIMPs[SecScanHookKey(cls, sel)] = [NSValue valueWithPointer:orig];
+    method_setImplementation(m, hookImp);
+    SecDebugLog(@"Hook %@ ← %@", NSStringFromSelector(sel), NSStringFromClass(cls));
+}
+
+static void SecCallOrigSignin(id self, SEL sel, ...) {
+    if (!g_signinOrigIMPs) return;
+    NSValue *v = g_signinOrigIMPs[SecScanHookKey(object_getClass(self), sel)];
+    IMP orig = v ? [v pointerValue] : NULL;
+    if (!orig) return;
+    va_list args;
+    va_start(args, sel);
+    id a1 = va_arg(args, id);
+    id a2 = va_arg(args, id);
+    id a3 = va_arg(args, id);
+    id a4 = va_arg(args, id);
+    id a5 = va_arg(args, id);
+    va_end(args);
+    if (sel == @selector(submitSinginWithBCDH:lat:lon:completion:)) {
+        ((void (*)(id, SEL, id, id, id, id))orig)(self, sel, a1, a2, a3, a4);
+    } else if (sel == @selector(sureSignin4Task:location:)) {
+        ((void (*)(id, SEL, id, id))orig)(self, sel, a1, a2);
+    } else {
+        ((void (*)(id, SEL, id))orig)(self, sel, a1);
+    }
+}
+
+static void SecPrepareSignin(id self, id task) {
+    if (!g_enabled) return;
+    SecBindActionStationFromObject(self);
+    if (task) SecBindActionStationFromObject(task);
+}
+
+static void hook_signin4Task(id self, SEL _cmd, id task) {
+    SecPrepareSignin(self, task);
+    SecCallOrigSignin(self, _cmd, task, nil, nil, nil);
+}
+
+static void hook_sureSignin4Task(id self, SEL _cmd, id task) {
+    SecPrepareSignin(self, task);
+    SecCallOrigSignin(self, _cmd, task, nil, nil, nil);
+}
+
+static void hook_sureSignin4TaskLocation(id self, SEL _cmd, id task, id location) {
+    SecPrepareSignin(self, task);
+    if (g_enabled) {
+        CLLocation *fake = SecFakeLocation();
+        if (fake) {
+            SecCallOrigSignin(self, _cmd, task, fake, nil, nil);
+            return;
+        }
+    }
+    SecCallOrigSignin(self, _cmd, task, location, nil, nil);
+}
+
+static void hook_submitSingin(id self, SEL _cmd, id bcdh, id lat, id lon, id completion) {
+    id useLat = lat;
+    id useLon = lon;
+    if (g_enabled) {
+        SecBindActionStationFromObject(self);
+        NSDictionary *t = SecResolveSpoofStation(nil, nil);
+        if (t) {
+            double slat, slon;
+            SecSpoofedCoords(t, &slat, &slon, NO);
+            useLat = @(slat);
+            useLon = @(slon);
+            SecPanelLog(@"签到 %@", SecStationTitle(t));
+        }
+    }
+    SecCallOrigSignin(self, _cmd, bcdh, useLat, useLon, completion);
+}
+
+static id hook_geofenceLocationError(id self, SEL _cmd, id location) {
+    if (g_enabled) {
+        SecBindActionStationFromObject(self);
+        SecRefreshFakeLocation();
+        return nil;
+    }
+    NSValue *v = g_signinOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    if (!v) return nil;
+    IMP orig = [v pointerValue];
+    return ((id (*)(id, SEL, id))orig)(self, _cmd, location);
+}
+
+static BOOL hook_canDoSignIn(id self, SEL _cmd) {
+    if (g_enabled) return YES;
+    NSValue *v = g_signinOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    if (!v) return NO;
+    IMP orig = [v pointerValue];
+    return ((BOOL (*)(id, SEL))orig)(self, _cmd);
+}
+
+static void hook_btnSignInAction(id self, SEL _cmd) {
+    if (g_enabled) {
+        SecBindActionStationFromObject(self);
+        SecRefreshFakeLocation();
+    }
+    NSValue *v = g_signinOrigIMPs[SecScanHookKey(object_getClass(self), _cmd)];
+    if (!v) return;
+    IMP orig = [v pointerValue];
+    ((void (*)(id, SEL))orig)(self, _cmd);
+}
+
+static void SecInstallSigninHooks(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+
+    int num = objc_getClassList(NULL, 0);
+    if (num <= 0) return;
+    Class *classes = (Class *)malloc((size_t)num * sizeof(Class));
+    if (!classes) return;
+    objc_getClassList(classes, num);
+
+    for (int i = 0; i < num; i++) {
+        Class cls = classes[i];
+        const char *name = class_getName(cls);
+        if (strncmp(name, "XPD", 3) != 0) continue;
+        SecHookSigninSelector(cls, @selector(signin4Task:), (IMP)hook_signin4Task);
+        SecHookSigninSelector(cls, @selector(sureSignin4Task:), (IMP)hook_sureSignin4Task);
+        SecHookSigninSelector(cls, @selector(sureSignin4Task:location:), (IMP)hook_sureSignin4TaskLocation);
+        SecHookSigninSelector(cls, @selector(geofenceLocationError:), (IMP)hook_geofenceLocationError);
+        SecHookSigninSelector(cls, @selector(canDoSignIn), (IMP)hook_canDoSignIn);
+        SecHookSigninSelector(cls, @selector(btnSignInAction:), (IMP)hook_btnSignInAction);
+    }
+
+    Class svc = NSClassFromString(@"XPDService");
+    if (svc) {
+        SecHookSigninSelector(svc, @selector(submitSinginWithBCDH:lat:lon:completion:),
+                              (IMP)hook_submitSingin);
+    }
+
+    free(classes);
+    installed = YES;
+    SecDebugLog(@"签到 Hook 就绪");
 }
 
 #pragma mark - 扫牌自动填车牌
@@ -1576,20 +1794,29 @@ void SecUpdateStatusLabel(void) {
         }
         return;
     }
+    NSUInteger pending = SecCountPendingStations();
     NSString *modeStr = g_autoMode ? @"自动" : @"手动";
-    g_statusLabel.text = [NSString stringWithFormat:@"[%@|%@] 共 %lu 站%@",
+    g_statusLabel.text = [NSString stringWithFormat:@"[%@|%@] 待到达 %lu/%lu 站%@",
                           g_enabled ? @"ON" : @"OFF",
                           modeStr,
+                          (unsigned long)pending,
                           (unsigned long)g_stations.count,
                           expSuffix];
 }
 
 static void SecUpdateStationPicker(void) {
     if (!g_stationPicker) return;
+    SecEnsurePendingSelection();
+    NSUInteger pending = SecCountPendingStations();
+    if (pending == 0) {
+        [g_stationPicker setTitle:@"▼ 全部已到达" forState:UIControlStateNormal];
+        g_stationPicker.enabled = NO;
+        return;
+    }
     NSDictionary *t = DisplayStation();
     NSString *title = t ? SecStationListTitle(t) : @"▼ 选择站点";
     [g_stationPicker setTitle:title forState:UIControlStateNormal];
-    g_stationPicker.enabled = g_stations.count > 0;
+    g_stationPicker.enabled = YES;
 }
 
 static UIViewController *SecPresenterVC(void) {
@@ -1910,14 +2137,19 @@ static void SecEnsureUI(void) {
         SecPanelLog(@"暂无站点，请先打开任务详情");
         return;
     }
+    if (SecCountPendingStations() == 0) {
+        SecPanelLog(@"所有站点已到达");
+        return;
+    }
 
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"选择站点（按时间顺序）"
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"选择站点（未到达）"
                                                               message:nil
                                                        preferredStyle:UIAlertControllerStyleActionSheet];
     // ActionSheet 先加的项在底部，倒序添加使显示顺序与 sortTime 一致（早→晚 从上到下）
     for (NSInteger i = (NSInteger)g_stations.count - 1; i >= 0; i--) {
-        NSInteger idx = i;
         NSDictionary *s = g_stations[(NSUInteger)i];
+        if (SecStationIsArrived(s)) continue;
+        NSInteger idx = i;
         NSString *label = SecStationListTitle(s);
         UIAlertAction *action = [UIAlertAction actionWithTitle:label
                                                            style:UIAlertActionStyleDefault
@@ -2146,6 +2378,7 @@ static void SecInstallHooks(void) {
         SecInstallDealTaskHooks();
         SecInstallStayedHooks();
         SecInstallPlateHooks();
+        SecInstallSigninHooks();
         dispatch_async(dispatch_get_main_queue(), ^{
             SecDebugLog(@"业务 Hook 就绪");
         });
