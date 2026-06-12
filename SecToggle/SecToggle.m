@@ -33,7 +33,12 @@ static void SecApplyDriveMode(BOOL syncPickerToRoute);
 static void SecBuildAutoRoute(void);
 static void SecBuildPendingRouteTo(NSInteger targetIdx);
 static NSDictionary *RouteDestStation(void);
+static NSDictionary *DisplayStation(void);
 static NSInteger SecIndexForZddm(NSString *zddm);
+static NSDictionary *SecStationForZddm(id zddmObj);
+static NSString *SecExtractZddmFromJson(NSString *raw);
+static NSDictionary *SecResolveSpoofStation(id appZddm, NSString *jsonRaw);
+static void SecSetActionZddm(NSString *zddm);
 static BOOL SecDictIndicatesArrived(NSDictionary *dict);
 static BOOL SecStationIsArrived(NSDictionary *s);
 static void SecMarkStationArrived(NSDictionary *s);
@@ -99,6 +104,8 @@ static id g_dealTaskTarget = nil;
 static id g_cachedAutoDealType = nil;
 static NSString *g_taskBcdh = nil;
 static NSString *g_taskBcmxdh = nil;
+static NSString *g_actionZddm = nil;
+static NSTimeInterval g_actionZddmUntil = 0;
 static CLLocation *g_fakeLocation = nil;
 static NSTimer *g_gpsPulseTimer = nil;
 static NSInteger g_gpsPulseIndex = 0;
@@ -258,6 +265,46 @@ static NSInteger SecIndexForZddm(NSString *zddm) {
     return -1;
 }
 
+static NSDictionary *SecStationForZddm(id zddmObj) {
+    if (!zddmObj || zddmObj == (id)kCFNull) return nil;
+    NSString *z = [[zddmObj description] stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!z.length || [z isEqualToString:@"(null)"] || [z isEqualToString:@"<null>"]) return nil;
+    NSInteger idx = SecIndexForZddm(z);
+    if (idx < 0) return nil;
+    return g_stations[(NSUInteger)idx];
+}
+
+static void SecSetActionZddm(NSString *zddm) {
+    if (!zddm.length) return;
+    g_actionZddm = [zddm copy];
+    g_actionZddmUntil = [[NSDate date] timeIntervalSince1970] + 10.0;
+}
+
+static NSString *SecExtractZddmFromJson(NSString *raw) {
+    if (!raw.length) return nil;
+    for (NSString *key in @[@"c_zddm", @"zddm"]) {
+        NSString *pat = [NSString stringWithFormat:@"\"%@\"\\s*:\\s*\"([^\"]+)\"", key];
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
+        if (!re) continue;
+        NSTextCheckingResult *m = [re firstMatchInString:raw options:0 range:NSMakeRange(0, raw.length)];
+        if (m.numberOfRanges > 1) {
+            return [raw substringWithRange:[m rangeAtIndex:1]];
+        }
+    }
+    return nil;
+}
+
+static NSDictionary *SecResolveSpoofStation(id appZddm, NSString *jsonRaw) {
+    NSDictionary *s = SecStationForZddm(appZddm);
+    if (!s && jsonRaw.length) {
+        s = SecStationForZddm(SecExtractZddmFromJson(jsonRaw));
+    }
+    if (s) return s;
+    if (g_autoMode && g_routeActive && g_routeDestIndex >= 0) return RouteDestStation();
+    return DisplayStation();
+}
+
 static NSDictionary *DisplayStation(void) {
     if (g_stations.count == 0) return nil;
     NSInteger idx = SecIndexForZddm(g_selectedZddm);
@@ -373,6 +420,10 @@ static void SecSortStations(void) {
 
 static NSDictionary *SpoofTarget(void) {
     if (g_stations.count == 0 || !g_enabled) return nil;
+    if (g_actionZddm.length && [[NSDate date] timeIntervalSince1970] < g_actionZddmUntil) {
+        NSDictionary *action = SecStationForZddm(g_actionZddm);
+        if (action) return action;
+    }
     if (g_autoMode && g_routeActive && g_routeDestIndex >= 0) return RouteDestStation();
     return DisplayStation();
 }
@@ -699,11 +750,15 @@ static void SecApplyGpsPatchToJson(NSString **inOutRaw, double wd, double jd, NS
 static NSString *PatchJsonForRequest(NSString *raw, NSString *url) {
     if (!g_enabled || !raw.length) return raw;
 
-    double wd = 0, jd = 0;
-    if (!SecResolveSpoofCoords(&wd, &jd)) return raw;
-
-    NSDictionary *t = CurrentTarget();
+    NSString *bodyZddm = SecExtractZddmFromJson(raw);
+    NSDictionary *t = SecResolveSpoofStation(nil, raw);
     if (!t) return raw;
+    if (bodyZddm.length && SecStationForZddm(bodyZddm)) {
+        SecSetActionZddm(bodyZddm);
+    }
+
+    double wd = 0, jd = 0;
+    SecSpoofedCoords(t, &wd, &jd, NO);
 
     NSString *out = raw;
     SecApplyGpsPatchToJson(&out, wd, jd, url, t);
@@ -980,16 +1035,18 @@ static void hook_dealTask(id self, SEL _cmd, id bcdh, id bcmxdh, id zddm,
     id useLat = lat;
     id useLon = lon;
     if (g_enabled) {
-        NSDictionary *t = CurrentTarget();
-        double slat, slon;
-        if (SecResolveSpoofCoords(&slat, &slon)) {
+        NSDictionary *action = SecStationForZddm(zddm);
+        NSDictionary *t = SecResolveSpoofStation(zddm, nil);
+        if (action) {
+            SecSetActionZddm([action[@"zddm"] description]);
+            SecPanelLog(@"按操作站 %@", SecStationTitle(action));
+        }
+        if (t) {
+            double slat, slon;
+            SecSpoofedCoords(t, &slat, &slon, !action && SecShouldJitterGps());
             useLat = @(slat);
             useLon = @(slon);
-            if (t) useZddm = t[@"zddm"] ?: zddm;
-        } else if (t) {
             useZddm = t[@"zddm"] ?: zddm;
-            useLat = t[@"wd"] ?: lat;
-            useLon = t[@"jd"] ?: lon;
         }
     }
 
