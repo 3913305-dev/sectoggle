@@ -104,7 +104,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("中邮司机帮 Android · 本地发卡")
                 .font(.subheadline.weight(.semibold))
-            Text("司机在安卓 SEC 面板复制 DC1- 设备码，粘贴后选月卡/季卡/年卡生成 AK1- 卡密。与 gen_license.py 算法一致。")
+            Text("司机在安卓 SEC 面板点「复制设备码」，粘贴 DC1 后发月卡/季卡/年卡。密钥指纹须为 \(LicenseCore.coreKeyPrefixHex)")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Text("密钥指纹 \(LicenseCore.coreKeyPrefixHex)")

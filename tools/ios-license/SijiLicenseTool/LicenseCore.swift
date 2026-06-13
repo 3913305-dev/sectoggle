@@ -54,18 +54,9 @@ enum LicenseCore {
     }
 
     static func parseDeviceCode(_ code: String) throws -> DeviceInfo {
-        var text = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        text = text.replacingOccurrences(of: " ", with: "")
-        if text.hasPrefix("DC1-") {
-            text = String(text.dropFirst(4))
-        } else if text.hasPrefix("DC1") {
-            text = String(text.dropFirst(3))
-        }
-        text = text.replacingOccurrences(of: "-", with: "")
-
-        let packed = b32Decode(text)
+        let packed = b32Decode(extractB32Payload(code))
         guard packed.count > 6 else {
-            throw LicenseError.invalidDeviceCode("设备码长度无效")
+            throw LicenseError.invalidDeviceCode("设备码长度无效，请点安卓面板「复制设备码」重新复制")
         }
 
         let cipher = packed.dropLast(6)
@@ -73,17 +64,44 @@ enum LicenseCore {
         let key = deriveCoreKey()
         let expect = hmacSha256(key: key, data: Data(cipher) + Data("dc-v1".utf8)).prefix(6)
         guard mac.elementsEqual(expect) else {
-            throw LicenseError.invalidDeviceCode("设备码校验失败（核心密钥不匹配或数据损坏）")
+            throw LicenseError.invalidDeviceCode(
+                "设备码校验失败：密钥不匹配或复制不完整（指纹 \(coreKeyPrefixHex)）"
+            )
         }
 
         guard let plain = String(data: xorStream(data: Data(cipher), key: key), encoding: .utf8) else {
             throw LicenseError.invalidDeviceCode("设备码内容无法解码")
         }
-        let parts = plain.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 4, parts[0] == "V1" else {
-            throw LicenseError.invalidDeviceCode("设备码内容无效")
-        }
+        let parts = try parseV1Payload(plain)
         return DeviceInfo(name: parts[1], plate: parts[2], deviceId: parts[3])
+    }
+
+    private static func extractB32Payload(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let dashVariants = ["–", "—", "−", "‐", "‑", "‒", "―", "－"]
+        for d in dashVariants {
+            text = text.replacingOccurrences(of: d, with: "-")
+        }
+        text = text.replacingOccurrences(of: " ", with: "")
+        if let range = text.range(of: "DC1") {
+            text = String(text[range.upperBound...])
+            if text.hasPrefix("-") {
+                text = String(text.dropFirst())
+            }
+        }
+        return text.filter { "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }
+    }
+
+    private static func parseV1Payload(_ plain: String) throws -> [String] {
+        guard plain.hasPrefix("V1|") else {
+            throw LicenseError.invalidDeviceCode("设备码内容无效（非 V1 格式，请确认是安卓 DC1 设备码）")
+        }
+        let rest = String(plain.dropFirst(3))
+        let sub = rest.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        guard sub.count == 3 else {
+            throw LicenseError.invalidDeviceCode("设备码内容无效（字段不完整，请重新复制完整设备码）")
+        }
+        return ["V1", sub[0], sub[1], sub[2]]
     }
 
     static func generateActivation(info: DeviceInfo, plan: CardPlan) -> (code: String, expiryYmd: Int) {
