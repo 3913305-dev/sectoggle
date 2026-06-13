@@ -39,6 +39,14 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
+ICON_DIR="$ROOT/SijiLicenseTool/Icons"
+if [ -d "$ICON_DIR" ]; then
+  echo "==> 写入桌面图标到 App 包"
+  cp "$ICON_DIR/AppIcon60x60@2x.png" "$APP/" 2>/dev/null || true
+  cp "$ICON_DIR/AppIcon60x60@3x.png" "$APP/" 2>/dev/null || true
+  cp "$ICON_DIR/AppIcon-1024.png" "$APP/" 2>/dev/null || true
+fi
+
 if command -v ldid >/dev/null 2>&1; then
   echo "==> ldid 伪签名（可选，部分巨魔环境更稳）"
   ldid -S "$APP/$SCHEME"

@@ -108,6 +108,27 @@ enum LicenseCore {
         return String(format: "%04d-%02d-%02d", y, m, d)
     }
 
+    enum CardPlan: String, CaseIterable, Identifiable {
+        case month = "月卡"
+        case quarter = "季卡"
+        case year = "年卡"
+
+        var id: String { rawValue }
+
+        var months: Int {
+            switch self {
+            case .month: return 1
+            case .quarter: return 3
+            case .year: return 12
+            }
+        }
+
+        func expiryDate(from base: Date = Date()) -> Date {
+            let cal = Calendar(identifier: .gregorian)
+            return cal.date(byAdding: .month, value: months, to: base) ?? base
+        }
+    }
+
     private static func hmacSha256(key: Data, data: Data) -> Data {
         let sym = SymmetricKey(data: key)
         return Data(HMAC<SHA256>.authenticationCode(for: data, using: sym))

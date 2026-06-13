@@ -3,9 +3,10 @@ import UIKit
 
 struct ContentView: View {
     @State private var deviceCodeInput = ""
-    @State private var expiryDate = Calendar.current.date(byAdding: .year, value: 1, to: Date()) ?? Date()
     @State private var parsedInfo: DeviceInfo?
     @State private var activationCode = ""
+    @State private var generatedPlan: LicenseCore.CardPlan?
+    @State private var generatedExpiryYmd = 0
     @State private var errorMessage = ""
     @State private var toastMessage = ""
 
@@ -28,28 +29,30 @@ struct ContentView: View {
                             .autocorrectionDisabled(true)
                     }
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("到期日期")
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("卡密类型")
                             .font(.headline)
-                        DatePicker("", selection: $expiryDate, displayedComponents: .date)
-                            .datePickerStyle(.graphical)
-                            .labelsHidden()
+                        HStack(spacing: 10) {
+                            ForEach(LicenseCore.CardPlan.allCases) { plan in
+                                Button {
+                                    generateActivation(plan: plan)
+                                } label: {
+                                    Text(plan.rawValue)
+                                        .font(.subheadline.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(planTint(plan))
+                            }
+                        }
                     }
 
-                    HStack(spacing: 12) {
-                        Button(action: decodeDeviceCode) {
-                            Label("解析", systemImage: "doc.text.magnifyingglass")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button(action: generateActivation) {
-                            Label("生成卡密", systemImage: "key.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.green)
+                    Button(action: decodeDeviceCode) {
+                        Label("解析设备码", systemImage: "doc.text.magnifyingglass")
+                            .frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.bordered)
 
                     if let info = parsedInfo {
                         infoCard(info)
@@ -71,7 +74,7 @@ struct ContentView: View {
                 }
                 .padding()
             }
-            .navigationTitle("SEC 授权工具")
+            .navigationTitle("SEC 发码")
             .navigationBarTitleDisplayMode(.inline)
             .overlay(alignment: .bottom) {
                 if !toastMessage.isEmpty {
@@ -93,7 +96,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("中邮司机帮 · 本地发卡")
                 .font(.subheadline.weight(.semibold))
-            Text("粘贴司机发来的 DC1- 设备码，选择到期日后生成 AK1- 激活卡密。算法与 gen_license.py 完全一致，可离线使用。")
+            Text("粘贴 DC1- 设备码，点月卡/季卡/年卡即可生成 AK1- 卡密。到期日按今天起算，可离线使用。")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Text("密钥指纹 \(LicenseCore.coreKeyPrefixHex)")
@@ -125,6 +128,14 @@ struct ContentView: View {
             HStack {
                 Text("激活卡密")
                     .font(.headline)
+                if let plan = generatedPlan {
+                    Text(plan.rawValue)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.15))
+                        .cornerRadius(6)
+                }
                 Spacer()
                 Button("复制") {
                     UIPasteboard.general.string = activationCode
@@ -139,9 +150,11 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(.tertiarySystemBackground))
                 .cornerRadius(8)
-            Text("到期 \(LicenseCore.formatYmd(LicenseCore.ymd(from: expiryDate)))")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            if generatedExpiryYmd > 0 {
+                Text("到期 \(LicenseCore.formatYmd(generatedExpiryYmd))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -159,9 +172,19 @@ struct ContentView: View {
         }
     }
 
+    private func planTint(_ plan: LicenseCore.CardPlan) -> Color {
+        switch plan {
+        case .month: return Color(red: 0.13, green: 0.59, blue: 0.95)
+        case .quarter: return Color(red: 0.96, green: 0.49, blue: 0.0)
+        case .year: return Color(red: 0.18, green: 0.63, blue: 0.33)
+        }
+    }
+
     private func decodeDeviceCode() {
         errorMessage = ""
         activationCode = ""
+        generatedPlan = nil
+        generatedExpiryYmd = 0
         do {
             parsedInfo = try LicenseCore.parseDeviceCode(deviceCodeInput)
             showToast("解析成功")
@@ -171,21 +194,26 @@ struct ContentView: View {
         }
     }
 
-    private func generateActivation() {
+    private func generateActivation(plan: LicenseCore.CardPlan) {
         errorMessage = ""
         do {
             let info = try LicenseCore.parseDeviceCode(deviceCodeInput)
             parsedInfo = info
+            let expiry = plan.expiryDate()
+            generatedPlan = plan
+            generatedExpiryYmd = LicenseCore.ymd(from: expiry)
             activationCode = LicenseCore.buildActivation(
                 name: info.name,
                 plate: info.plate,
                 deviceId: info.deviceId,
-                expiry: expiryDate
+                expiry: expiry
             )
-            showToast("卡密已生成")
+            showToast("\(plan.rawValue)已生成")
         } catch {
             parsedInfo = nil
             activationCode = ""
+            generatedPlan = nil
+            generatedExpiryYmd = 0
             errorMessage = error.localizedDescription
         }
     }

@@ -3,7 +3,8 @@ tools/ios-license/build/
 tools/ios-license/SEC授权工具*.ipa
 
 # Generated app icon (CI regenerates)
-tools/ios-license/SijiLicenseTool/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+tools/ios-license/SijiLicenseTool/Assets.xcassets/AppIcon.appiconset/AppIcon-*.png
+tools/ios-license/SijiLicenseTool/Icons/
 
 # IDE / OS
 .idea/
