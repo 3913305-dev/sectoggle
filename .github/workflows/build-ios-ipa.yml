@@ -1,0 +1,69 @@
+name: Build iOS IPA (TrollStore)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "tools/ios-license/**"
+      - ".github/workflows/build-ios-ipa.yml"
+    tags:
+      - "ios-v*"
+  pull_request:
+    paths:
+      - "tools/ios-license/**"
+      - ".github/workflows/build-ios-ipa.yml"
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    permissions:
+      contents: ${{ startsWith(github.ref, 'refs/tags/ios-v') && 'write' || 'read' }}
+    defaults:
+      run:
+        working-directory: tools/ios-license
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          for xcode in /Applications/Xcode_15.4.app /Applications/Xcode_15.2.app /Applications/Xcode.app; do
+            if [ -d "$xcode" ]; then
+              sudo xcode-select -s "$xcode/Contents/Developer"
+              break
+            fi
+          done
+          xcodebuild -version
+          sw_vers
+
+      - name: Prepare app icon
+        run: python3 scripts/prepare_icon.py
+
+      - name: Build TrollStore IPA
+        run: |
+          chmod +x build_ipa_troll.sh
+          ./build_ipa_troll.sh
+
+      - name: Verify IPA
+        run: |
+          ls -lh SEC授权工具_troll.ipa
+          unzip -l SEC授权工具_troll.ipa | head -20
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SEC授权工具-${{ github.run_number }}
+          path: tools/ios-license/SEC授权工具_troll.ipa
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/ios-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tools/ios-license/SEC授权工具_troll.ipa
+          generate_release_notes: true

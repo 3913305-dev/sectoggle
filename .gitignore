@@ -1,0 +1,13 @@
+# iOS build output
+tools/ios-license/build/
+tools/ios-license/SEC授权工具*.ipa
+
+# Generated app icon (CI regenerates)
+tools/ios-license/SijiLicenseTool/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.xcuserstate
