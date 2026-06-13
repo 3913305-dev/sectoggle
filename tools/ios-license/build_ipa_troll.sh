@@ -24,13 +24,18 @@ xcodebuild \
   -configuration Release \
   -sdk iphoneos \
   -derivedDataPath "$BUILD_DIR" \
+  CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY="-" \
   CODE_SIGNING_ALLOWED=YES \
   CODE_SIGNING_REQUIRED=NO \
-  build
+  DEVELOPMENT_TEAM="" \
+  AD_HOC_CODE_SIGNING_ALLOWED=YES \
+  build 2>&1 | tee "$BUILD_DIR/xcodebuild.log"
 
 if [ ! -d "$APP" ]; then
   echo "未找到 $APP"
+  echo "=== xcodebuild log (tail) ==="
+  tail -80 "$BUILD_DIR/xcodebuild.log" || true
   exit 1
 fi
 
