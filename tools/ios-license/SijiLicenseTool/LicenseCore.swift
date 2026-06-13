@@ -91,16 +91,16 @@ enum LicenseCore {
         return text.filter { "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }
     }
 
-    private static func parseV1Payload(_ plain: String) throws -> [String] {
+    private static func parseV1Payload(_ plain: String) throws -> (String, String) {
         guard plain.hasPrefix("V1|") else {
             throw LicenseError.invalidDeviceCode("设备码内容无效（非 V1 格式，请确认是安卓 DC1 设备码）")
         }
         let rest = String(plain.dropFirst(3))
-        let sub = rest.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
-        guard sub.count == 3 else {
+        let sub = rest.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard sub.count >= 2 else {
             throw LicenseError.invalidDeviceCode("设备码内容无效（字段不完整，请重新复制完整设备码）")
         }
-        return ["V1", sub[0], sub[1], sub[2]]
+        return (sub[0], sub[1])
     }
 
     static func generateActivation(info: DeviceInfo, plan: CardPlan) -> (code: String, expiryYmd: Int) {
