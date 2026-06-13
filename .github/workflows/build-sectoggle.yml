@@ -1,0 +1,45 @@
+name: Build SecToggle.dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'SecToggle/**'
+      - '.github/workflows/build-sectoggle.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build SecToggle.dylib
+        run: |
+          cd SecToggle
+          echo "=== source head ==="
+          head -12 SecToggle.m
+          set -e
+          if ! xcrun -sdk iphoneos clang -arch arm64 \
+            -Wno-deprecated-declarations \
+            -Wno-incompatible-function-pointer-types \
+            -dynamiclib -fobjc-arc \
+            -framework UIKit -framework Foundation -framework CoreLocation -framework Security \
+            -install_name @executable_path/SecToggle.dylib \
+            -o SecToggle.dylib SecToggle.m SecLicenseCore.m SecDeviceID.m \
+            -miphoneos-version-min=13.0 > build.log 2>&1; then
+            echo "=== build failed ==="
+            cat build.log
+            grep -E 'error:|warning:' build.log | head -20 | while IFS= read -r line; do
+              echo "::error title=clang::$line"
+            done
+            exit 1
+          fi
+          cat build.log
+          file SecToggle.dylib
+          ls -la SecToggle.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SecToggle.dylib
+          path: SecToggle/SecToggle.dylib
+          retention-days: 30
