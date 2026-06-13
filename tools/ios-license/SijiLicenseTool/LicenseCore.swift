@@ -15,7 +15,6 @@ enum LicenseError: LocalizedError {
 struct DeviceInfo {
     let name: String
     let plate: String
-    let deviceId: String
 }
 
 /// 与中邮司机帮 Android（LocationBypassHelper + gen_license.py）一致
@@ -72,8 +71,8 @@ enum LicenseCore {
         guard let plain = String(data: xorStream(data: Data(cipher), key: key), encoding: .utf8) else {
             throw LicenseError.invalidDeviceCode("设备码内容无法解码")
         }
-        let parts = try parseV1Payload(plain)
-        return DeviceInfo(name: parts[1], plate: parts[2], deviceId: parts[3])
+        let (name, plate) = try parseV1Payload(plain)
+        return DeviceInfo(name: name, plate: plate)
     }
 
     private static func extractB32Payload(_ raw: String) -> String {
@@ -107,12 +106,7 @@ enum LicenseCore {
     static func generateActivation(info: DeviceInfo, plan: CardPlan) -> (code: String, expiryYmd: Int) {
         let expiry = plan.expiryDate()
         let expiryYmd = ymd(from: expiry)
-        let code = buildActivation(
-            name: info.name,
-            plate: info.plate,
-            deviceId: info.deviceId,
-            expiry: expiry
-        )
+        let code = buildActivation(name: info.name, plate: info.plate, expiry: expiry)
         return (code, expiryYmd)
     }
 
@@ -144,9 +138,9 @@ enum LicenseCore {
         return Data(SHA256.hash(data: Data(seed.utf8)))
     }
 
-    private static func buildActivation(name: String, plate: String, deviceId: String, expiry: Date) -> String {
+    private static func buildActivation(name: String, plate: String, expiry: Date) -> String {
         let expiryYmd = ymd(from: expiry)
-        let signInput = Data("V1|\(name)|\(plate)|\(deviceId)|\(expiryYmd)".utf8)
+        let signInput = Data("V1|\(name)|\(plate)|\(expiryYmd)".utf8)
         let key = deriveCoreKey()
         let sig = hmacSha256(key: key, data: signInput).prefix(10)
         var packed = Data()

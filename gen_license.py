@@ -86,7 +86,7 @@ def format_groups(raw: str) -> str:
     return "-".join(parts)
 
 
-def parse_device_code(code: str) -> tuple[str, str, str]:
+def parse_device_code(code: str) -> tuple[str, str]:
     text = _extract_b32_payload(code)
     packed = b32_decode(text)
     if len(packed) <= 6:
@@ -98,8 +98,7 @@ def parse_device_code(code: str) -> tuple[str, str, str]:
     if mac != expect:
         raise ValueError("设备码校验失败（核心密钥不匹配或数据损坏）")
     plain = xor_stream(cipher, key).decode("utf-8")
-    parts = _parse_v1_payload(plain)
-    return parts[1], parts[2], parts[3]
+    return _parse_v1_payload(plain)
 
 
 def _normalize_dashes(text: str) -> str:
@@ -117,14 +116,14 @@ def _extract_b32_payload(code: str) -> str:
     return re.sub(r"[^A-Z2-7]", "", text)
 
 
-def _parse_v1_payload(plain: str) -> list[str]:
+def _parse_v1_payload(plain: str) -> tuple[str, str]:
     if not plain.startswith("V1|"):
         raise ValueError(f"设备码内容无效: {plain!r}")
     rest = plain[3:]
-    parts = rest.split("|", 2)
-    if len(parts) != 3:
+    parts = rest.split("|")
+    if len(parts) < 2:
         raise ValueError("设备码内容无效（字段不完整，请重新复制完整设备码）")
-    return ["V1", parts[0], parts[1], parts[2]]
+    return parts[0], parts[1]
 
 
 def ymd_from_date(date_str: str) -> int:
@@ -132,8 +131,8 @@ def ymd_from_date(date_str: str) -> int:
     return dt.year * 10000 + dt.month * 100 + dt.day
 
 
-def build_activation(name: str, plate: str, device_id: str, expiry_ymd: int) -> str:
-    sign_input = f"V1|{name}|{plate}|{device_id}|{expiry_ymd}".encode("utf-8")
+def build_activation(name: str, plate: str, expiry_ymd: int) -> str:
+    sign_input = f"V1|{name}|{plate}|{expiry_ymd}".encode("utf-8")
     key = derive_core_key()
     sig = hmac_sha256(key, sign_input)[:10]
     packed = struct.pack(">I", expiry_ymd) + sig
@@ -141,18 +140,17 @@ def build_activation(name: str, plate: str, device_id: str, expiry_ymd: int) -> 
 
 
 def cmd_decode(args: argparse.Namespace) -> int:
-    name, plate, device = parse_device_code(args.device_code)
+    name, plate = parse_device_code(args.device_code)
     print("解析成功")
     print(f"  姓名: {name}")
     print(f"  车牌: {plate}")
-    print(f"  设备: {device}")
     return 0
 
 
 def cmd_gen(args: argparse.Namespace) -> int:
-    name, plate, device = parse_device_code(args.device_code)
+    name, plate = parse_device_code(args.device_code)
     expiry = ymd_from_date(args.expire)
-    card = build_activation(name, plate, device, expiry)
+    card = build_activation(name, plate, expiry)
     print("激活卡密（发给司机）")
     print(card)
     print()

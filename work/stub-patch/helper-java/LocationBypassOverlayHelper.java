@@ -42,6 +42,8 @@ public final class LocationBypassOverlayHelper {
     private static ScrollView stationListScroll;
     private static Switch masterSwitch;
     private static TextView licenseStatusLabel;
+    private static LinearLayout deviceCodeCard;
+    private static LinearLayout activationCard;
     private static TextView deviceCodeLabel;
     private static EditText activationInput;
 
@@ -165,6 +167,8 @@ public final class LocationBypassOverlayHelper {
         stationListScroll = null;
         masterSwitch = null;
         licenseStatusLabel = null;
+        deviceCodeCard = null;
+        activationCard = null;
         deviceCodeLabel = null;
         activationInput = null;
         panelVisible = false;
@@ -180,6 +184,7 @@ public final class LocationBypassOverlayHelper {
         if (deviceCodeLabel != null) {
             deviceCodeLabel.setText(LocationBypassLicenseHelper.buildDeviceCode());
         }
+        refreshLicenseSectionVisibility();
         refreshStationList();
         if (masterSwitch != null) {
             masterSwitch.setOnCheckedChangeListener(null);
@@ -212,6 +217,17 @@ public final class LocationBypassOverlayHelper {
                     LocationBypassLogHelper.log(isChecked ? "定位开关已开启" : "定位开关已关闭");
                 }
             };
+
+    private static void refreshLicenseSectionVisibility() {
+        boolean licensed = LocationBypassLicenseHelper.isLicensed();
+        int visibility = licensed ? View.GONE : View.VISIBLE;
+        if (deviceCodeCard != null) {
+            deviceCodeCard.setVisibility(visibility);
+        }
+        if (activationCard != null) {
+            activationCard.setVisibility(visibility);
+        }
+    }
 
     private static void refreshStationList() {
         if (stationListInner == null) {
@@ -540,6 +556,7 @@ public final class LocationBypassOverlayHelper {
         panel.addView(licenseStatusLabel, matchWrap());
 
         LinearLayout dcCard = new LinearLayout(context);
+        deviceCodeCard = dcCard;
         dcCard.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable dcCardBg = new GradientDrawable();
         dcCardBg.setCornerRadius(dp(context, 8));
@@ -600,6 +617,7 @@ public final class LocationBypassOverlayHelper {
         panel.addView(dcCard, dcCardLp);
 
         LinearLayout actCard = new LinearLayout(context);
+        activationCard = actCard;
         actCard.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable actCardBg = new GradientDrawable();
         actCardBg.setCornerRadius(dp(context, 8));

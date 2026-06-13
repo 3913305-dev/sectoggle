@@ -104,7 +104,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("中邮司机帮 Android · 本地发卡")
                 .font(.subheadline.weight(.semibold))
-            Text("司机在安卓 SEC 面板点「复制设备码」，粘贴 DC1 后发月卡/季卡/年卡。密钥指纹须为 \(LicenseCore.coreKeyPrefixHex)")
+            Text("司机在安卓 SEC 面板点「复制设备码」，粘贴 DC1 后发月卡/季卡/年卡。卡密绑定姓名+车牌+核心密钥，换机可继续用。指纹 \(LicenseCore.coreKeyPrefixHex)")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Text("密钥指纹 \(LicenseCore.coreKeyPrefixHex)")
@@ -123,7 +123,6 @@ struct ContentView: View {
                 .font(.headline)
             row("姓名", info.name)
             row("车牌", info.plate)
-            row("设备", info.deviceId)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
