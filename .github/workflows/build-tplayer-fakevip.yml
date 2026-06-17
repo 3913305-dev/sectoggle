@@ -17,7 +17,9 @@ jobs:
         run: |
           cd TPlayerFakeVIP
           set -e
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           if ! xcrun -sdk iphoneos clang -arch arm64 \
+            -isysroot "$SDK" \
             -Wno-deprecated-declarations \
             -Wno-incompatible-function-pointer-types \
             -dynamiclib -fobjc-arc \

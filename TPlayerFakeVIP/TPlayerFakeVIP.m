@@ -2,7 +2,6 @@
 // Inject via TrollFools into com.twanjia.teslaplayer
 
 #import <Foundation/Foundation.h>
-#import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 
 static NSString *const kBundleID = @"com.twanjia.teslaplayer";
@@ -259,20 +258,13 @@ static void TPScheduleReseedBurst(void) {
 }
 
 static void TPStartPeriodicReseed(void) {
-    static dispatch_source_t timer;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        dispatch_queue_t q = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
-        dispatch_source_set_timer(timer,
-                                  dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
-                                  10 * NSEC_PER_SEC,
-                                  1 * NSEC_PER_SEC);
-        dispatch_source_set_event_handler(timer, ^{
+    TPScheduleReseedBurst();
+    for (int round = 1; round <= 12; round++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(round * 10 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
             if (TPFakeVIPEnabled()) TPSeedLocalUnlockCaches();
         });
-        dispatch_source_resume(timer);
-    });
+    }
 }
 
 #pragma mark - Response patch
