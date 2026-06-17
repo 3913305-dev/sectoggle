@@ -6,8 +6,19 @@
 ^https?://teslaapi\.twanjia\.com url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
 
 [mitm]
-hostname = teslaapi.twanjia.com
+hostname = teslaapi.twanjia.com, *.twanjia.com
 */
+
+var TP_DEBUG = true;
+var TP_HIT = 0;
+
+function tpDbg(title, body) {
+  if (!TP_DEBUG) return;
+  TP_HIT++;
+  if (TP_HIT <= 5) {
+    try { $notify(title, body, $request.url); } catch (e) {}
+  }
+}
 
 var DIAL_IDS = [
   "amap", "apple_map", "amap_navigation", "apple_maps_navigation",
@@ -158,16 +169,19 @@ if (!shouldPatch(url)) {
 
     if (isAuthUrl(url)) {
       if (enc) {
+        tpDbg("TPlayer QX", "auth encrypted -> bypass");
         $done({ body: dedicated || wrap(vipData()) });
       } else {
         mergeVip(ensureDataObject(obj));
         obj.code = 0;
         obj.msg = "ok";
         obj.encrypted = false;
+        tpDbg("TPlayer QX", "auth merge ok");
         $done({ body: JSON.stringify(obj) });
       }
     } else if (dedicated) {
       if (enc) {
+        tpDbg("TPlayer QX", "patch " + (url.split("?")[0].split("/").pop() || "api"));
         $done({ body: dedicated });
       } else {
         if (urlHas(url, "/vip/checkVipStatus") || urlHas(url, "/user/getUserInfo")) {
