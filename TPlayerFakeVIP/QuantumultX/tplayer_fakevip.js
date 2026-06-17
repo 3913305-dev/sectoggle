@@ -1,5 +1,13 @@
-// TPlayer com.twanjia.teslaplayer — script-response-body 脚本
-// 配合 [rewrite_local] 一行 + [script] 远程引用
+/*
+> TPlayer FakeVIP 特别玩家内测
+> 引用方式：重写 → 规则资源 → 资源路径填本 js 链接 → 开启资源解析器
+
+[rewrite_local]
+^https?://teslaapi\.twanjia\.com url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+
+[mitm]
+hostname = teslaapi.twanjia.com
+*/
 
 var DIAL_IDS = [
   "amap", "apple_map", "amap_navigation", "apple_maps_navigation",

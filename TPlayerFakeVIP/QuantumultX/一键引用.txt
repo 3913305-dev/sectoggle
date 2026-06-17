@@ -1,0 +1,42 @@
+# 圈 X 一键引用（最新版逻辑）
+
+## 操作（3 步）
+
+1. **设置 → 重写 → 规则资源 → +**
+
+2. **资源路径**（只填 URL）：
+```
+https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+```
+
+3. **资源解析器：必须开启** ← 关键！
+   标签随意，如 `TPlayer-FakeVIP`
+
+保存 → 更新资源 → QX 关再开 → 禁用 dylib → 特别玩家重登
+
+---
+
+## 原理
+
+js 文件头部已内置 `[rewrite_local]` + `[mitm]`。
+KOP-XIAO 资源解析器会从 js 里提取规则和主机名。
+
+**不开解析器** → 报 `Invalid Line var DIAL_IDS`
+
+---
+
+## 确认配置里有解析器
+
+配置文件 `[general]` 应有：
+```
+resource_parser_url=https://raw.githubusercontent.com/KOP-XIAO/QuantumultX/master/Scripts/resource-parser.js
+```
+（你其它订阅能解析的话，这条已有）
+
+---
+
+## 不必再手动写
+
+- 不用改 `[script]`
+- 不用改 `[rewrite_local]`
+- 不用下 `.conf` / `.rewrite`
