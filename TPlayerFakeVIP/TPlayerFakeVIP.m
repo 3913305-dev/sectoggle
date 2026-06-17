@@ -1,4 +1,4 @@
-// TPlayerFakeVIP v3 — crash-safe: network-only hooks, no UserDefaults/JSONDecoder swizzle.
+// TPlayerFakeVIP v4 — login-aware merge patch + real dial ID cache re-seed.
 // Inject via TrollFools into com.twanjia.teslaplayer
 
 #import <Foundation/Foundation.h>
@@ -11,6 +11,31 @@ static NSString *const kLogTag = @"[TPlayerFakeVIP]";
 static BOOL TPFakeVIPEnabled(void) {
     if ([[NSUserDefaults standardUserDefaults] objectForKey:kEnabledKey] == nil) return YES;
     return [[NSUserDefaults standardUserDefaults] boolForKey:kEnabledKey];
+}
+
+#pragma mark - Known unlock IDs
+
+static NSArray<NSString *> *TPKnownDialIDs(void) {
+    static NSArray<NSString *> *ids;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        ids = @[
+            @"amap", @"apple_map", @"amap_navigation", @"apple_maps_navigation",
+            @"amap_dial", @"apple_map_dial", @"classic", @"emitter", @"navigation",
+            @"tita", @"tita_pro", @"tita_ultra", @"pie", @"hud", @"dashboard",
+            @"model3", @"modely", @"cybertruck", @"retro", @"minimal", @"neon",
+        ];
+    });
+    return ids;
+}
+
+static NSArray<NSString *> *TPKnownEffectIDs(void) {
+    static NSArray<NSString *> *ids;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        ids = @[ @"effect_1", @"effect_2", @"effect_3", @"effect_4", @"acceleration" ];
+    });
+    return ids;
 }
 
 #pragma mark - JSON helpers
@@ -40,6 +65,25 @@ static BOOL TPURLHas(NSURL *url, NSString *needle) {
     return [abs rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
 
+static BOOL TPURLHasAny(NSURL *url, NSArray<NSString *> *needles) {
+    for (NSString *n in needles) {
+        if (TPURLHas(url, n)) return YES;
+    }
+    return NO;
+}
+
+static BOOL TPIsAuthURL(NSURL *url) {
+    return TPURLHasAny(url, @[
+        @"/auth/phone/login",
+        @"/auth/phone/password_login",
+        @"/auth/wechat/app_login",
+        @"/auth/apple/login",
+        @"/auth/email/login",
+        @"/auth/email/register",
+        @"/user/accountMergeCommit",
+    ]);
+}
+
 static BOOL TPShouldPatchURL(NSURL *url) {
     if (!TPFakeVIPEnabled() || !url) return NO;
     if (!TPURLHas(url, @"teslaapi.twanjia.com")) return NO;
@@ -55,6 +99,13 @@ static BOOL TPShouldPatchURL(NSURL *url) {
             @"/effect/myUnlocks",
             @"/wallpaper/getMyUnlocks",
             @"/wallpaper/iapProducts",
+            @"/auth/phone/login",
+            @"/auth/phone/password_login",
+            @"/auth/wechat/app_login",
+            @"/auth/apple/login",
+            @"/auth/email/login",
+            @"/auth/email/register",
+            @"/user/accountMergeCommit",
         ];
     });
 
@@ -64,6 +115,60 @@ static BOOL TPShouldPatchURL(NSURL *url) {
     return NO;
 }
 
+#pragma mark - Entitlement merge
+
+static void TPMergeVIPFields(NSMutableDictionary *d) {
+    if (!d) return;
+    d[@"is_vip"] = @1;
+    d[@"_is_vip"] = @1;
+    d[@"is_lifetime_vip"] = @1;
+    d[@"is_lifetime"] = @1;
+    d[@"_is_lifetime"] = @1;
+    d[@"is_ad_free"] = @1;
+    d[@"_is_ad_free"] = @1;
+    d[@"vip_days_left"] = [NSNull null];
+    d[@"_days_left"] = [NSNull null];
+    d[@"vip_end_time"] = [NSNull null];
+    d[@"_vip_end_time"] = [NSNull null];
+    d[@"_subscription_provider"] = @"internal_test";
+}
+
+static void TPMergeUnlockLists(NSMutableDictionary *d) {
+    if (!d) return;
+    NSArray *dials = TPKnownDialIDs();
+    NSArray *effects = TPKnownEffectIDs();
+    d[@"dial_unlocks"] = dials;
+    d[@"_dial_unlocks"] = dials;
+    d[@"effect_unlocks"] = effects;
+    d[@"_effect_unlocks"] = effects;
+    d[@"wallpaper_unlocks"] = @[];
+    d[@"_wallpaper_unlocks"] = @[];
+    d[@"mini_player_unlocks"] = @[];
+    d[@"_mini_player_unlocks"] = @[];
+    d[@"unlocked_all"] = @YES;
+}
+
+static void TPMergeEntitlementsIntoDict(NSMutableDictionary *d) {
+    if (!d) return;
+    TPMergeVIPFields(d);
+    TPMergeUnlockLists(d);
+}
+
+static NSMutableDictionary *TPMutablePayloadContainer(NSMutableDictionary *root) {
+    id data = root[@"data"];
+    if ([data isKindOfClass:[NSMutableDictionary class]]) {
+        return (NSMutableDictionary *)data;
+    }
+    if ([data isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *m = [data mutableCopy];
+        root[@"data"] = m;
+        return m;
+    }
+    NSMutableDictionary *created = [NSMutableDictionary dictionary];
+    root[@"data"] = created;
+    return created;
+}
+
 static BOOL TPMarkUnlocked(id node) {
     BOOL changed = NO;
     @try {
@@ -71,8 +176,10 @@ static BOOL TPMarkUnlocked(id node) {
             NSMutableDictionary *d = node;
             if (d[@"unlocked"] != nil) { d[@"unlocked"] = @YES; changed = YES; }
             if (d[@"is_vip"] != nil) { d[@"is_vip"] = @1; changed = YES; }
+            if (d[@"_is_vip"] != nil) { d[@"_is_vip"] = @1; changed = YES; }
             if (d[@"is_lifetime_vip"] != nil) { d[@"is_lifetime_vip"] = @1; changed = YES; }
             if (d[@"is_lifetime"] != nil) { d[@"is_lifetime"] = @1; changed = YES; }
+            if (d[@"_is_lifetime"] != nil) { d[@"_is_lifetime"] = @1; changed = YES; }
             if (d[@"unlocked_all"] != nil) { d[@"unlocked_all"] = @YES; changed = YES; }
             for (NSString *k in [d.allKeys copy]) {
                 changed |= TPMarkUnlocked(d[k]);
@@ -86,17 +193,30 @@ static BOOL TPMarkUnlocked(id node) {
     return changed;
 }
 
+static NSDictionary *TPEntitlementDataDict(void) {
+    static NSDictionary *d;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableDictionary *m = [NSMutableDictionary dictionary];
+        TPMergeEntitlementsIntoDict(m);
+        m[@"nickname"] = @"VIP";
+        m[@"avatar_url"] = @"";
+        d = [m copy];
+    });
+    return d;
+}
+
 static NSData *TPFakePayloadForURL(NSURL *url) {
-    if (TPURLHas(url, @"/vip/checkVipStatus") || TPURLHas(url, @"/user/getUserInfo")) {
+    if (TPURLHas(url, @"/vip/checkVipStatus")) {
         return TPJSONData(@{
             @"code": @0, @"msg": @"ok", @"encrypted": @NO,
-            @"data": @{
-                @"is_vip": @1,
-                @"is_lifetime_vip": @1,
-                @"is_lifetime": @1,
-                @"vip_days_left": [NSNull null],
-                @"vip_end_time": [NSNull null],
-            },
+            @"data": TPEntitlementDataDict(),
+        });
+    }
+    if (TPURLHas(url, @"/user/getUserInfo")) {
+        return TPJSONData(@{
+            @"code": @0, @"msg": @"ok", @"encrypted": @NO,
+            @"data": TPEntitlementDataDict(),
         });
     }
     if (TPURLHas(url, @"/vip/activateWithIAP")) {
@@ -117,36 +237,113 @@ static NSData *TPFakePayloadForURL(NSURL *url) {
     return nil;
 }
 
+#pragma mark - UserDefaults seed
+
+static void TPSeedLocalUnlockCaches(void) {
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        [ud setObject:TPKnownDialIDs() forKey:@"dashboard_unlocked_dial_ids"];
+        [ud setObject:TPKnownEffectIDs() forKey:@"dashboard_acceleration_effect_unlocked_ids"];
+    } @catch (__unused NSException *e) {}
+}
+
+static void TPScheduleReseedBurst(void) {
+    TPSeedLocalUnlockCaches();
+    for (int i = 1; i <= 6; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (TPFakeVIPEnabled()) TPSeedLocalUnlockCaches();
+        });
+    }
+}
+
+static void TPStartPeriodicReseed(void) {
+    static dispatch_source_t timer;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_t q = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+        dispatch_source_set_timer(timer,
+                                  dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                                  10 * NSEC_PER_SEC,
+                                  1 * NSEC_PER_SEC);
+        dispatch_source_set_event_handler(timer, ^{
+            if (TPFakeVIPEnabled()) TPSeedLocalUnlockCaches();
+        });
+        dispatch_source_resume(timer);
+    });
+}
+
+#pragma mark - Response patch
+
 static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
     if (!TPShouldPatchURL(url)) return data;
 
     @try {
+        if (TPIsAuthURL(url)) {
+            TPScheduleReseedBurst();
+        }
+
         id parsed = TPJSONParse(data);
 
         if (![parsed isKindOfClass:[NSDictionary class]]) {
+            if (TPIsAuthURL(url)) {
+                NSLog(@"%@ auth-nonjson pass-through url=%@", kLogTag, url.absoluteString);
+                return data;
+            }
             NSData *fake = TPFakePayloadForURL(url);
             if (fake) {
                 NSLog(@"%@ replace-nonjson url=%@", kLogTag, url.absoluteString);
+                TPScheduleReseedBurst();
                 return fake;
             }
             return data;
         }
 
         NSMutableDictionary *root = [parsed mutableCopy];
+        BOOL encrypted = [root[@"encrypted"] boolValue];
 
-        if ([root[@"encrypted"] boolValue]) {
+        if (TPIsAuthURL(url)) {
+            if (encrypted) {
+                NSLog(@"%@ auth-encrypted pass-through + reseed url=%@", kLogTag, url.absoluteString);
+                return data;
+            }
+            TPMergeEntitlementsIntoDict(root);
+            TPMergeEntitlementsIntoDict(TPMutablePayloadContainer(root));
+            root[@"encrypted"] = @NO;
+            NSData *out = TPJSONData(root);
+            if (out) {
+                NSLog(@"%@ auth-merge url=%@", kLogTag, url.absoluteString);
+                TPScheduleReseedBurst();
+                return out;
+            }
+            return data;
+        }
+
+        if (encrypted) {
             NSData *fake = TPFakePayloadForURL(url);
             if (fake) {
                 NSLog(@"%@ decrypt-bypass url=%@", kLogTag, url.absoluteString);
+                TPScheduleReseedBurst();
                 return fake;
             }
+            return data;
         }
 
-        if (TPMarkUnlocked(root)) {
+        BOOL changed = NO;
+        if (TPURLHas(url, @"/user/getUserInfo") || TPURLHas(url, @"/vip/checkVipStatus")) {
+            TPMergeEntitlementsIntoDict(TPMutablePayloadContainer(root));
+            changed = YES;
+        }
+
+        changed |= TPMarkUnlocked(root);
+
+        if (changed) {
             root[@"encrypted"] = @NO;
             NSData *out = TPJSONData(root);
             if (out) {
                 NSLog(@"%@ patch-json url=%@", kLogTag, url.absoluteString);
+                TPScheduleReseedBurst();
                 return out;
             }
         }
@@ -157,17 +354,7 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
     return data;
 }
 
-#pragma mark - UserDefaults seed (no swizzle)
-
-static void TPSeedLocalUnlockCaches(void) {
-    @try {
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setObject:@[@"*"] forKey:@"dashboard_unlocked_dial_ids"];
-        [ud setObject:@[@"*"] forKey:@"dashboard_acceleration_effect_unlocked_ids"];
-    } @catch (__unused NSException *e) {}
-}
-
-#pragma mark - NSURLSession hook (NSURLSession only, once)
+#pragma mark - NSURLSession hook
 
 typedef void (^TPCompletion)(NSData *, NSURLResponse *, NSError *);
 
@@ -239,9 +426,10 @@ __attribute__((constructor)) static void TPFakeVIPInit(void) {
         if (![[NSBundle mainBundle].bundleIdentifier isEqualToString:kBundleID]) return;
 
         TPSeedLocalUnlockCaches();
+        TPStartPeriodicReseed();
         TPInstallNSURLSessionHooks();
 
-        NSLog(@"%@ v3 loaded enabled=%d (safe mode)", kLogTag, TPFakeVIPEnabled());
+        NSLog(@"%@ v4 loaded enabled=%d (login merge + dial ids)", kLogTag, TPFakeVIPEnabled());
     } @catch (NSException *e) {
         NSLog(@"%@ init failed: %@", kLogTag, e);
     }

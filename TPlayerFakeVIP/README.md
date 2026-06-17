@@ -9,9 +9,11 @@
 
 | 层级 | 行为 |
 |------|------|
-| 本地缓存 | 写入 `dashboard_unlocked_dial_ids` / `dashboard_acceleration_effect_unlocked_ids` = `["*"]` |
+| 本地缓存 | 写入真实表盘 ID 列表（`amap`、`apple_map` 等 20+ 个），登录后每 10s 回写 |
+| 登录 merge | `/auth/*/login` 明文响应 merge `is_vip` + `dial_unlocks`（保留 token） |
+| 登录加密 | 加密登录 **不整包替换**（保留 token），触发 burst 回写本地解锁列表 |
 | 网络 Hook | 拦截 `NSURLSession`，篡改以下接口响应 |
-| | `/vip/checkVipStatus` → `is_vip: 1` 终身会员 |
+| | `/vip/checkVipStatus`、`/user/getUserInfo` → VIP + dial_unlocks |
 | | `/vip/activateWithIAP` → 直接成功 |
 | | `/effect/myUnlocks`、`/wallpaper/getMyUnlocks` → 全解锁 |
 | | 其他 JSON 里递归把 `unlocked` / `is_vip` 改成 true |
@@ -90,9 +92,20 @@ xcrun -sdk iphoneos clang -dynamiclib \
 1. 登录后进 **会员页** → 应显示已开通 / 终身
 2. 进 **表盘** → 点以前要付费的表盘 → 应能直接用，不弹窗
 3. **Console**（Mac 连 iPhone）过滤 `TPlayerFakeVIP`，应看到：
-   - `v2 loaded enabled=1`
-   - `decrypt-bypass encrypted url=...`（说明绕过了加密响应）
-   - `patch-json url=...` 或 `JSONSerialization patched`
+   - `v4 loaded enabled=1 (login merge + dial ids)`
+   - `auth-encrypted pass-through + reseed`（登录加密，已触发回写）
+   - `auth-merge url=...`（明文登录已 merge VIP）
+   - `decrypt-bypass url=...`（checkVipStatus / getUserInfo 加密绕过）
+   - `patch-json url=...`
+
+## v4 表盘解锁修复（相对 v3）
+
+| 问题 | v4 处理 |
+|------|---------|
+| 登录 `_dial_unlocks` 为空 | 明文登录 merge；加密登录 pass-through + 定时回写真实 dial ID |
+| `["*"]` 通配符无效 | 改为 20+ 真实表盘 type ID |
+| 首页读 AuthService 登录态 | 增强 `/user/getUserInfo` 假数据含 VIP + dial_unlocks |
+| 登录不能整包替换 | 加密 `/auth/*` 仅 pass-through，不丢 token |
 
 ## v3 稳定性修复（若 v2 闪退）
 
