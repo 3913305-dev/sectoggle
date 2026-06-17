@@ -2,6 +2,7 @@
 // Inject via TrollFools into com.twanjia.teslaplayer
 
 #import <Foundation/Foundation.h>
+#import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 
 static NSString *const kBundleID = @"com.twanjia.teslaplayer";
