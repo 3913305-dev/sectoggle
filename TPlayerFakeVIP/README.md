@@ -87,9 +87,29 @@ xcrun -sdk iphoneos clang -dynamiclib \
 
 ## 验证是否生效
 
-1. 登录后进会员页，应显示已开通 / 终身
-2. 表盘列表不再弹 `LockedDialOverlay` 付费窗（配合本地缓存）
-3. Console 过滤：`TPlayerFakeVIP`
+1. 登录后进 **会员页** → 应显示已开通 / 终身
+2. 进 **表盘** → 点以前要付费的表盘 → 应能直接用，不弹窗
+3. **Console**（Mac 连 iPhone）过滤 `TPlayerFakeVIP`，应看到：
+   - `v2 loaded enabled=1`
+   - `decrypt-bypass encrypted url=...`（说明绕过了加密响应）
+   - `patch-json url=...` 或 `JSONSerialization patched`
+
+## v2 修复了什么（若 v1 无效）
+
+| 问题 | v2 处理 |
+|------|---------|
+| API 返回 `encrypted: true` 密文 | 整包替换为明文假 VIP 数据 |
+| Swift `JSONDecoder` 不走旧 hook | 尝试 hook `decode:from:` + JSON 层补丁 |
+| 仅 hook `NSURLSession` 基类 | 同时 hook `__NSURLSessionLocal` |
+| `["*"]` 通配符可能无效 | 主要靠 `is_vip=1` 走会员全解锁 |
+| 未覆盖 `/user/getUserInfo` | 已加入假 VIP 响应 |
+
+## 若仍无效
+
+1. **完全杀掉 App** 再开（多任务划掉）
+2. **退出账号重新登录**
+3. TrollFools 确认库状态为 **已启用**，且 Bundle 为 `com.twanjia.teslaplayer`
+4. Console 里若只有 `v2 loaded` 没有 `decrypt-bypass` / `patch-json`，说明网络栈仍未 hook 到，把日志发我再加规则
 
 ---
 
