@@ -3,7 +3,13 @@
 > 引用方式：重写 → 规则资源 → 资源路径填本 js 链接 → 开启资源解析器
 
 [rewrite_local]
-^https?://teslaapi\.twanjia\.com url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+^https?:\/\/teslaapi\.twanjia\.com\/vip\/ url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+^https?:\/\/teslaapi\.twanjia\.com\/user\/ url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+^https?:\/\/teslaapi\.twanjia\.com\/auth\/ url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+^https?:\/\/teslaapi\.twanjia\.com\/effect\/ url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+^https?:\/\/teslaapi\.twanjia\.com\/wallpaper\/ url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+^https?:\/\/teslaapi\.twanjia\.com url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+^https?:\/\/(.*\.)?twanjia\.com\/.*(vip|auth|user|effect|wallpaper) url script-response-body https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
 
 [mitm]
 hostname = teslaapi.twanjia.com, *.twanjia.com
@@ -140,19 +146,19 @@ function fakeForUrl(url) {
 }
 
 function shouldPatch(url) {
-  if (!urlHas(url, "teslaapi.twanjia.com")) return false;
-  var paths = [
-    "/vip/checkVipStatus", "/vip/activateWithIAP", "/vip/getPlanList",
-    "/user/getUserInfo", "/effect/myUnlocks", "/wallpaper/getMyUnlocks",
-    "/wallpaper/iapProducts"
-  ];
-  for (var i = 0; i < paths.length; i++) {
-    if (urlHas(url, paths[i])) return true;
-  }
-  return isAuthUrl(url);
+  if (!url) return false;
+  if (urlHas(url, "teslaapi.twanjia.com")) return true;
+  if (urlHas(url, "twanjia.com") && (
+    urlHas(url, "/vip/") || urlHas(url, "/auth/") || urlHas(url, "/user/") ||
+    urlHas(url, "/effect/") || urlHas(url, "/wallpaper/")
+  )) return true;
+  return false;
 }
 
 var url = $request.url;
+try { console.log("[TPlayerFakeVIP] invoke " + url); } catch (e) {}
+tpDbg("TPlayer QX", "script invoked");
+
 if (!shouldPatch(url)) {
   $done({});
 } else {
