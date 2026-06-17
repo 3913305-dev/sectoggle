@@ -1,0 +1,51 @@
+圈 X「资源 - 重写」界面填写说明
+================================
+
+【截图里报「内容无效」的原因】
+「资源路径」只能填纯 URL，不能带 tag= enabled= 等参数。
+整行订阅格式是写在配置文件里的，不是填在这个输入框里。
+
+--------------------------------
+方案 A（推荐）：不用重写，只加脚本
+--------------------------------
+设置 → 脚本 → + → 引用
+
+资源路径（只填 URL）：
+https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js
+
+标签：tplayer_fakevip.js
+资源解析器：关
+
+MitM 主机名：teslaapi.twanjia.com
+
+--------------------------------
+方案 B：加重写资源（需先导入脚本）
+--------------------------------
+第一步 — 脚本（同方案 A，必须先做）
+
+第二步 — 重写 → + → 资源
+
+资源路径（只填下面这一行 URL，不要带逗号）：
+https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.rewrite.conf
+
+标签：TPlayer-FakeVIP
+资源解析器：关（.conf 已有 [rewrite_local] 头）
+插入资源：开或关均可
+自动更新：随意
+
+--------------------------------
+方案 C：用 .rewrite 纯规则文件
+--------------------------------
+资源路径（只填 URL）：
+https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.rewrite
+
+标签：TPlayer-FakeVIP
+资源解析器：必须开启（opt-parser）
+必须先导入脚本 tplayer_fakevip.js
+
+--------------------------------
+不要填进「资源路径」的内容
+--------------------------------
+❌ https://...rewrite, tag=..., enabled=true, opt-parser=true
+❌ tplayer_fakevip.qx.conf
+❌ tplayer_fakevip.js（这是脚本不是重写）

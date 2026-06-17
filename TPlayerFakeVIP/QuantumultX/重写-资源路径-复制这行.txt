@@ -1,6 +1,8 @@
-# 圈 X → 设置 → 重写 → + → 引用重写 →「资源路径」
-# 复制下面【一整行】粘贴，不要只粘 https 链接
-#
-# 注意：必须先导入脚本（见 method1-仅脚本.conf），再导入重写，否则会无效
+# 圈 X → 设置 → 重写 → + → 资源
+# 「资源路径」只填下面这一行 URL（不要带 tag= 等参数）
 
-https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.rewrite, tag=TPlayer-FakeVIP, enabled=true, opt-parser=true, update-interval=86400
+https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.rewrite.conf
+
+# 标签填：TPlayer-FakeVIP
+# 资源解析器：关闭
+# 必须先导入脚本 tplayer_fakevip.js
