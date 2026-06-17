@@ -33,6 +33,8 @@ static NSString *TPShortURL(NSURL *url);
 static NSString *TPPeekEncrypted(NSData *data);
 static void TPLog(NSString *fmt, ...);
 static void TPInstallDebugOverlay(void);
+static void TPUDSetOrig(NSUserDefaults *ud, id value, NSString *key);
+static NSArray *TPMergedDialList(id incoming);
 
 static BOOL TPFakeVIPEnabled(void) {
     return TPGloballyEnabled;
