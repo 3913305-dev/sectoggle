@@ -1,0 +1,15 @@
+# 配置文件里改两处（保存后 QX 关再开）
+
+# ===== 1. [rewrite_local] 段里加一行（本地重写，最优先）=====
+# 找到 [rewrite_local]，在段头下面加：
+
+^https?://teslaapi\.twanjia\.com url script-response-body tplayer_fakevip.js
+
+# ===== 2. [script] 段里已有则跳过，没有则加：=====
+
+[script]
+https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js, tag=tplayer_fakevip.js, enabled=true
+
+# ===== 3. [mitm] 已有 teslaapi.twanjia.com 即可 =====
+
+# ===== 4. 删掉 [rewrite_remote] 里任何 tplayer_fakevip.js 行 =====

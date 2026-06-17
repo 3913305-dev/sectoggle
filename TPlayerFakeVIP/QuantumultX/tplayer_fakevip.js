@@ -1,6 +1,5 @@
-// http-response ^https?://teslaapi\.twanjia\.com require-body=true,max-size=524288
-// TPlayer com.twanjia.teslaplayer — 内测 VIP 响应改写
-// 只需：MitM 开 + 引用本脚本（无需单独加重写规则）
+// TPlayer com.twanjia.teslaplayer — script-response-body 脚本
+// 配合 [rewrite_local] 一行 + [script] 远程引用
 
 var DIAL_IDS = [
   "amap", "apple_map", "amap_navigation", "apple_maps_navigation",
