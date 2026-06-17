@@ -1,0 +1,110 @@
+{
+  "_comment": "TPlayer 各接口对应明文响应（encrypted:false），供对照/静态 302 用",
+
+  "vip_checkVipStatus_and_getUserInfo": {
+    "code": 0,
+    "msg": "ok",
+    "encrypted": false,
+    "data": {
+      "is_vip": 1,
+      "_is_vip": 1,
+      "is_lifetime_vip": 1,
+      "is_lifetime": 1,
+      "_is_lifetime": 1,
+      "is_ad_free": 1,
+      "_is_ad_free": 1,
+      "vip_days_left": null,
+      "_days_left": null,
+      "vip_end_time": null,
+      "_vip_end_time": null,
+      "_subscription_provider": "internal_test",
+      "dial_unlocks": [
+        "amap", "apple_map", "amap_navigation", "apple_maps_navigation",
+        "amap_dial", "apple_map_dial", "classic", "emitter", "navigation",
+        "tita", "tita_pro", "tita_ultra", "pie", "hud", "hud_dashboard",
+        "dashboard", "all_in_one_navigation_dial", "dashboard_startup_dial",
+        "model3", "modely", "cybertruck", "retro", "minimal", "neon"
+      ],
+      "_dial_unlocks": [
+        "amap", "apple_map", "amap_navigation", "apple_maps_navigation",
+        "amap_dial", "apple_map_dial", "classic", "emitter", "navigation",
+        "tita", "tita_pro", "tita_ultra", "pie", "hud", "hud_dashboard",
+        "dashboard", "all_in_one_navigation_dial", "dashboard_startup_dial",
+        "model3", "modely", "cybertruck", "retro", "minimal", "neon"
+      ],
+      "effect_unlocks": ["effect_1", "effect_2", "effect_3", "effect_4", "acceleration"],
+      "_effect_unlocks": ["effect_1", "effect_2", "effect_3", "effect_4", "acceleration"],
+      "wallpaper_unlocks": [],
+      "_wallpaper_unlocks": [],
+      "mini_player_unlocks": [],
+      "_mini_player_unlocks": [],
+      "unlocked_all": true,
+      "nickname": "VIP",
+      "avatar_url": ""
+    }
+  },
+
+  "vip_activateWithIAP": {
+    "code": 0,
+    "msg": "ok",
+    "encrypted": false,
+    "data": {
+      "activated": true,
+      "is_vip": 1,
+      "is_lifetime_vip": 1
+    }
+  },
+
+  "effect_myUnlocks_and_wallpaper_getMyUnlocks": {
+    "code": 0,
+    "msg": "ok",
+    "encrypted": false,
+    "data": {
+      "list": [],
+      "unlocked_all": true
+    }
+  },
+
+  "wallpaper_iapProducts_and_vip_getPlanList": {
+    "code": 0,
+    "msg": "ok",
+    "encrypted": false,
+    "data": []
+  },
+
+  "auth_login_plaintext_merge": {
+    "_note": "登录接口若为明文：在原有 data 上 merge vip 字段，保留 access_token 等",
+    "code": 0,
+    "msg": "ok",
+    "encrypted": false,
+    "data": {
+      "access_token": "<保留服务端原值>",
+      "_access_token": "<保留服务端原值>",
+      "refresh_token": "<保留服务端原值>",
+      "_refresh_token": "<保留服务端原值>",
+      "is_vip": 1,
+      "_is_vip": 1,
+      "is_lifetime_vip": 1,
+      "dial_unlocks": ["classic", "tita", "tita_pro", "hud", "dashboard"],
+      "_dial_unlocks": ["classic", "tita", "tita_pro", "hud", "dashboard"],
+      "unlocked_all": true
+    }
+  },
+
+  "auth_login_encrypted_bypass": {
+    "_note": "登录 encrypted:true 时 QX 只能整包替换为此结构（无 token，可能登不进去）",
+    "code": 0,
+    "msg": "ok",
+    "encrypted": false,
+    "data": {
+      "is_vip": 1,
+      "_is_vip": 1,
+      "is_lifetime_vip": 1,
+      "dial_unlocks": ["classic", "tita", "tita_pro", "hud", "dashboard"],
+      "_dial_unlocks": ["classic", "tita", "tita_pro", "hud", "dashboard"],
+      "unlocked_all": true,
+      "nickname": "VIP",
+      "avatar_url": ""
+    }
+  }
+}
