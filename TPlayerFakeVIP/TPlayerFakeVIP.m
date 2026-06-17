@@ -1,4 +1,4 @@
-// TPlayerFakeVIP v4 — login-aware merge patch + real dial ID cache re-seed.
+// TPlayerFakeVIP v5 — post-decrypt JSON merge + UserDefaults unlock guard.
 // Inject via TrollFools into com.twanjia.teslaplayer
 
 #import <Foundation/Foundation.h>
@@ -7,6 +7,8 @@
 static NSString *const kBundleID = @"com.twanjia.teslaplayer";
 static NSString *const kEnabledKey = @"tp_fake_vip.enabled";
 static NSString *const kLogTag = @"[TPlayerFakeVIP]";
+static NSString *const kDialUnlockKey = @"dashboard_unlocked_dial_ids";
+static NSString *const kEffectUnlockKey = @"dashboard_acceleration_effect_unlocked_ids";
 
 static BOOL TPFakeVIPEnabled(void) {
     if ([[NSUserDefaults standardUserDefaults] objectForKey:kEnabledKey] == nil) return YES;
@@ -16,26 +18,27 @@ static BOOL TPFakeVIPEnabled(void) {
 #pragma mark - Known unlock IDs
 
 static NSArray<NSString *> *TPKnownDialIDs(void) {
-    static NSArray<NSString *> *ids;
+    static NSArray<NSString *> *list;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        ids = @[
+        list = @[
             @"amap", @"apple_map", @"amap_navigation", @"apple_maps_navigation",
             @"amap_dial", @"apple_map_dial", @"classic", @"emitter", @"navigation",
-            @"tita", @"tita_pro", @"tita_ultra", @"pie", @"hud", @"dashboard",
+            @"tita", @"tita_pro", @"tita_ultra", @"pie", @"hud", @"hud_dashboard",
+            @"dashboard", @"all_in_one_navigation_dial", @"dashboard_startup_dial",
             @"model3", @"modely", @"cybertruck", @"retro", @"minimal", @"neon",
         ];
     });
-    return ids;
+    return list;
 }
 
 static NSArray<NSString *> *TPKnownEffectIDs(void) {
-    static NSArray<NSString *> *ids;
+    static NSArray<NSString *> *list;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        ids = @[ @"effect_1", @"effect_2", @"effect_3", @"effect_4", @"acceleration" ];
+        list = @[ @"effect_1", @"effect_2", @"effect_3", @"effect_4", @"acceleration" ];
     });
-    return ids;
+    return list;
 }
 
 #pragma mark - JSON helpers
@@ -169,6 +172,54 @@ static NSMutableDictionary *TPMutablePayloadContainer(NSMutableDictionary *root)
     return created;
 }
 
+static BOOL TPDictHasEntitlementMarkers(NSDictionary *d) {
+    if (!d) return NO;
+    static NSArray<NSString *> *keys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keys = @[
+            @"_access_token", @"access_token", @"_refresh_token",
+            @"_dial_unlocks", @"dial_unlocks",
+            @"_effect_unlocks", @"effect_unlocks",
+            @"_is_vip", @"is_vip", @"is_lifetime_vip", @"_is_lifetime",
+        ];
+    });
+    for (NSString *k in keys) {
+        if (d[k] != nil) return YES;
+    }
+    return NO;
+}
+
+static BOOL TPIsEntitlementPayload(id obj) {
+    if (![obj isKindOfClass:[NSDictionary class]]) return NO;
+    NSDictionary *d = (NSDictionary *)obj;
+    if (TPDictHasEntitlementMarkers(d)) return YES;
+    id data = d[@"data"];
+    if ([data isKindOfClass:[NSDictionary class]]) {
+        return TPDictHasEntitlementMarkers((NSDictionary *)data);
+    }
+    return NO;
+}
+
+static void TPSeedLocalUnlockCaches(void);
+static void TPScheduleReseedBurst(void);
+
+static id TPPatchParsedJSONObject(id result) {
+    if (!TPFakeVIPEnabled() || !result) return result;
+    @try {
+        if (![result isKindOfClass:[NSDictionary class]]) return result;
+        if (!TPIsEntitlementPayload(result)) return result;
+
+        NSMutableDictionary *root = [(NSDictionary *)result mutableCopy];
+        TPMergeEntitlementsIntoDict(root);
+        TPMergeEntitlementsIntoDict(TPMutablePayloadContainer(root));
+        NSLog(@"%@ json-post-decrypt merge", kLogTag);
+        TPScheduleReseedBurst();
+        return root;
+    } @catch (__unused NSException *e) {}
+    return result;
+}
+
 static BOOL TPMarkUnlocked(id node) {
     BOOL changed = NO;
     @try {
@@ -242,8 +293,8 @@ static NSData *TPFakePayloadForURL(NSURL *url) {
 static void TPSeedLocalUnlockCaches(void) {
     @try {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setObject:TPKnownDialIDs() forKey:@"dashboard_unlocked_dial_ids"];
-        [ud setObject:TPKnownEffectIDs() forKey:@"dashboard_acceleration_effect_unlocked_ids"];
+        [ud setObject:TPKnownDialIDs() forKey:kDialUnlockKey];
+        [ud setObject:TPKnownEffectIDs() forKey:kEffectUnlockKey];
     } @catch (__unused NSException *e) {}
 }
 
@@ -267,7 +318,17 @@ static void TPStartPeriodicReseed(void) {
     }
 }
 
-#pragma mark - Response patch
+static NSArray *TPMergedDialList(id incoming) {
+    NSMutableOrderedSet *set = [NSMutableOrderedSet orderedSetWithArray:TPKnownDialIDs()];
+    if ([incoming isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)incoming) {
+            if ([item isKindOfClass:[NSString class]]) [set addObject:item];
+        }
+    }
+    return [set array];
+}
+
+#pragma mark - Response patch (network layer)
 
 static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
     if (!TPShouldPatchURL(url)) return data;
@@ -281,12 +342,11 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
 
         if (![parsed isKindOfClass:[NSDictionary class]]) {
             if (TPIsAuthURL(url)) {
-                NSLog(@"%@ auth-nonjson pass-through url=%@", kLogTag, url.absoluteString);
                 return data;
             }
             NSData *fake = TPFakePayloadForURL(url);
             if (fake) {
-                NSLog(@"%@ replace-nonjson url=%@", kLogTag, url.absoluteString);
+                NSLog(@"%@ decrypt-bypass url=%@", kLogTag, url.absoluteString);
                 TPScheduleReseedBurst();
                 return fake;
             }
@@ -298,7 +358,7 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
 
         if (TPIsAuthURL(url)) {
             if (encrypted) {
-                NSLog(@"%@ auth-encrypted pass-through + reseed url=%@", kLogTag, url.absoluteString);
+                NSLog(@"%@ auth-encrypted pass-through (json-hook handles decrypt) url=%@", kLogTag, url.absoluteString);
                 return data;
             }
             TPMergeEntitlementsIntoDict(root);
@@ -328,7 +388,6 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
             TPMergeEntitlementsIntoDict(TPMutablePayloadContainer(root));
             changed = YES;
         }
-
         changed |= TPMarkUnlocked(root);
 
         if (changed) {
@@ -345,6 +404,81 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
     }
 
     return data;
+}
+
+#pragma mark - NSJSONSerialization hook (post-decrypt)
+
+static IMP TPOrig_JSONObjectWithData = NULL;
+
+static id TPHook_JSONObjectWithData(id self, SEL _cmd, NSData *data, NSJSONReadingOptions opts, NSError **error) {
+    id (*orig)(id, SEL, NSData *, NSJSONReadingOptions, NSError **) =
+        (id (*)(id, SEL, NSData *, NSJSONReadingOptions, NSError **))TPOrig_JSONObjectWithData;
+    id result = orig(self, _cmd, data, opts, error);
+    return TPPatchParsedJSONObject(result);
+}
+
+static void TPInstallJSONHooks(void) {
+    Class cls = objc_getMetaClass("NSJSONSerialization");
+    if (!cls) cls = [NSJSONSerialization class];
+    if (!cls) return;
+
+    SEL sel = @selector(JSONObjectWithData:options:error:);
+    Method m = class_getClassMethod(cls, sel);
+    if (m && !TPOrig_JSONObjectWithData) {
+        TPOrig_JSONObjectWithData = method_getImplementation(m);
+        method_setImplementation(m, (IMP)TPHook_JSONObjectWithData);
+    }
+}
+
+#pragma mark - UserDefaults guard (dial unlock keys only)
+
+static IMP TPOrig_UD_objectForKey = NULL;
+static IMP TPOrig_UD_setObjectForKey = NULL;
+
+static id TPHook_UD_objectForKey(id self, SEL _cmd, NSString *key) {
+    id (*orig)(id, SEL, NSString *) = (id (*)(id, SEL, NSString *))TPOrig_UD_objectForKey;
+    if (TPFakeVIPEnabled()) {
+        if ([key isEqualToString:kDialUnlockKey]) {
+            id val = orig(self, _cmd, key);
+            NSArray *merged = TPMergedDialList(val);
+            NSLog(@"%@ defaults-read dial ids count=%lu", kLogTag, (unsigned long)merged.count);
+            return merged;
+        }
+        if ([key isEqualToString:kEffectUnlockKey]) {
+            return TPKnownEffectIDs();
+        }
+    }
+    return orig(self, _cmd, key);
+}
+
+static void TPHook_UD_setObjectForKey(id self, SEL _cmd, id value, NSString *key) {
+    void (*orig)(id, SEL, id, NSString *) = (void (*)(id, SEL, id, NSString *))TPOrig_UD_setObjectForKey;
+    if (TPFakeVIPEnabled()) {
+        if ([key isEqualToString:kDialUnlockKey]) {
+            value = TPMergedDialList(value);
+            NSLog(@"%@ defaults-write dial ids count=%lu", kLogTag, (unsigned long)[(NSArray *)value count]);
+        } else if ([key isEqualToString:kEffectUnlockKey]) {
+            value = TPKnownEffectIDs();
+        }
+    }
+    orig(self, _cmd, value, key);
+}
+
+static void TPInstallUserDefaultsHooks(void) {
+    Class cls = [NSUserDefaults class];
+    if (!cls) return;
+
+    Method m1 = class_getInstanceMethod(cls, @selector(objectForKey:));
+    if (m1 && !TPOrig_UD_objectForKey) {
+        TPOrig_UD_objectForKey = method_getImplementation(m1);
+        method_setImplementation(m1, (IMP)TPHook_UD_objectForKey);
+    }
+
+    Method m2 = class_getInstanceMethod(cls, @selector(setObject:forKey:));
+    if (m2 && !TPOrig_UD_setObjectForKey) {
+        TPOrig_UD_setObjectForKey = method_getImplementation(m2);
+        method_setImplementation(m2, (IMP)TPHook_UD_setObjectForKey);
+    }
 }
 
 #pragma mark - NSURLSession hook
@@ -421,8 +555,10 @@ __attribute__((constructor)) static void TPFakeVIPInit(void) {
         TPSeedLocalUnlockCaches();
         TPStartPeriodicReseed();
         TPInstallNSURLSessionHooks();
+        TPInstallJSONHooks();
+        TPInstallUserDefaultsHooks();
 
-        NSLog(@"%@ v4 loaded enabled=%d (login merge + dial ids)", kLogTag, TPFakeVIPEnabled());
+        NSLog(@"%@ v5 loaded enabled=%d (json-post-decrypt + defaults-guard)", kLogTag, TPFakeVIPEnabled());
     } @catch (NSException *e) {
         NSLog(@"%@ init failed: %@", kLogTag, e);
     }
