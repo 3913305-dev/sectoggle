@@ -94,7 +94,19 @@ xcrun -sdk iphoneos clang -dynamiclib \
    - `decrypt-bypass encrypted url=...`（说明绕过了加密响应）
    - `patch-json url=...` 或 `JSONSerialization patched`
 
-## v2 修复了什么（若 v1 无效）
+## v3 稳定性修复（若 v2 闪退）
+
+v2 以下 hook 会导致崩溃，**v3 已全部移除**：
+
+| 已移除 | 原因 |
+|--------|------|
+| `JSONDecoder.decode` hook | Swift 方法 ABI 不兼容，必崩 |
+| `NSUserDefaults` 全局 swizzle | 大量 key 类型不匹配 |
+| `NSJSONSerialization` 全局 hook | 误伤地图/配置等 JSON |
+| 所有 teslaapi 默认假响应 | 破坏登录/车辆等接口 |
+| hook `__NSURLSessionLocal` | 重复 hook 链崩溃 |
+
+v3 仅保留：**NSURLSession 网络层 + 白名单 URL + 加密绕过**。
 
 | 问题 | v2 处理 |
 |------|---------|
