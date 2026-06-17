@@ -1,4 +1,4 @@
-// TPlayerFakeVIP v6 — v5 + on-screen floating debug log panel.
+// TPlayerFakeVIP v7 — fix crash: no UD recursion, safe overlay window.
 // Inject via TrollFools into com.twanjia.teslaplayer
 
 #import <Foundation/Foundation.h>
@@ -19,6 +19,14 @@ static UIButton *TPDebugRestoreBtn = nil;
 static NSMutableArray<NSString *> *TPDebugLines = nil;
 static dispatch_queue_t TPDebugQueue = NULL;
 static CGPoint TPDebugDragStart = {0, 0};
+static BOOL TPGloballyEnabled = YES;
+static BOOL TPDebugPanelOn = YES;
+static _Thread_local int TPInJSONHook = 0;
+static _Thread_local int TPInUDHook = 0;
+
+static IMP TPOrig_UD_objectForKey = NULL;
+static IMP TPOrig_UD_setObjectForKey = NULL;
+static IMP TPOrig_JSONObjectWithData = NULL;
 
 static id TPJSONParse(NSData *data);
 static NSString *TPShortURL(NSURL *url);
@@ -27,13 +35,27 @@ static void TPLog(NSString *fmt, ...);
 static void TPInstallDebugOverlay(void);
 
 static BOOL TPFakeVIPEnabled(void) {
-    if ([[NSUserDefaults standardUserDefaults] objectForKey:kEnabledKey] == nil) return YES;
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kEnabledKey];
+    return TPGloballyEnabled;
 }
 
 static BOOL TPDebugPanelEnabled(void) {
-    if ([[NSUserDefaults standardUserDefaults] objectForKey:kDebugPanelKey] == nil) return YES;
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kDebugPanelKey];
+    return TPDebugPanelOn;
+}
+
+static id TPUDReadOrig(NSUserDefaults *ud, NSString *key) {
+    if (TPOrig_UD_objectForKey) {
+        id (*orig)(id, SEL, NSString *) = (id (*)(id, SEL, NSString *))TPOrig_UD_objectForKey;
+        return orig(ud, @selector(objectForKey:), key);
+    }
+    return [ud objectForKey:key];
+}
+
+static void TPRefreshConfigFlags(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    id enabled = TPUDReadOrig(ud, kEnabledKey);
+    TPGloballyEnabled = (enabled == nil) ? YES : [enabled boolValue];
+    id panel = TPUDReadOrig(ud, kDebugPanelKey);
+    TPDebugPanelOn = (panel == nil) ? YES : [panel boolValue];
 }
 
 static NSString *TPTimeStamp(void) {
@@ -83,10 +105,7 @@ static void TPHideDebugPanel(void) {
 static void TPShowDebugPanel(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (TPDebugRestoreWindow) TPDebugRestoreWindow.hidden = YES;
-        if (TPDebugWindow) {
-            TPDebugWindow.hidden = NO;
-            [TPDebugWindow makeKeyAndVisible];
-        }
+        if (TPDebugWindow) TPDebugWindow.hidden = NO;
     });
 }
 
@@ -123,31 +142,36 @@ static void TPDebugHandlePan(UIPanGestureRecognizer *gr) {
 @end
 
 static void TPInstallDebugOverlay(void) {
-    if (!TPDebugPanelEnabled()) return;
+    if (!TPDebugPanelOn) return;
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (TPDebugWindow) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            if (TPDebugWindow) return;
 
-        TPDebugActions *actions = [TPDebugActions new];
+            TPDebugActions *actions = [TPDebugActions new];
+            CGFloat w = 300, h = 220;
 
-        CGFloat w = 300, h = 220;
-        TPDebugWindow = [[UIWindow alloc] initWithFrame:CGRectMake(10, 90, w, h)];
-        TPDebugWindow.windowLevel = UIWindowLevelStatusBar + 50;
-        TPDebugWindow.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
-        TPDebugWindow.layer.cornerRadius = 10;
-        TPDebugWindow.clipsToBounds = YES;
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    TPDebugWindow.windowScene = (UIWindowScene *)scene;
-                    break;
+            TPDebugWindow = [[UIWindow alloc] initWithFrame:CGRectMake(10, 90, w, h)];
+            TPDebugWindow.windowLevel = UIWindowLevelStatusBar + 50;
+            TPDebugWindow.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
+            TPDebugWindow.layer.cornerRadius = 10;
+            TPDebugWindow.clipsToBounds = YES;
+            if (@available(iOS 13.0, *)) {
+                for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        TPDebugWindow.windowScene = (UIWindowScene *)scene;
+                        break;
+                    }
                 }
             }
-        }
 
-        UIView *root = [[UIView alloc] initWithFrame:TPDebugWindow.bounds];
-        root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [TPDebugWindow addSubview:root];
+            UIViewController *vc = [UIViewController new];
+            vc.view.backgroundColor = UIColor.clearColor;
+            TPDebugWindow.rootViewController = vc;
+
+            UIView *root = vc.view;
+            root.frame = TPDebugWindow.bounds;
+            root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, w - 16, 18)];
         title.text = @"FakeVIP Debug (drag)";
@@ -186,23 +210,27 @@ static void TPInstallDebugOverlay(void) {
         TPDebugRestoreWindow.windowLevel = UIWindowLevelStatusBar + 60;
         TPDebugRestoreWindow.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *)) TPDebugRestoreWindow.windowScene = TPDebugWindow.windowScene;
+        TPDebugRestoreWindow.rootViewController = [UIViewController new];
+        TPDebugRestoreWindow.rootViewController.view.backgroundColor = UIColor.clearColor;
 
         TPDebugRestoreBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         TPDebugRestoreBtn.frame = TPDebugRestoreWindow.bounds;
+        TPDebugRestoreBtn.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         TPDebugRestoreBtn.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.9];
         TPDebugRestoreBtn.layer.cornerRadius = 15;
         [TPDebugRestoreBtn setTitle:@"D" forState:UIControlStateNormal];
         TPDebugRestoreBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
         [TPDebugRestoreBtn addTarget:actions action:@selector(restoreTapped) forControlEvents:UIControlEventTouchUpInside];
-        [TPDebugRestoreWindow addSubview:TPDebugRestoreBtn];
+        [TPDebugRestoreWindow.rootViewController.view addSubview:TPDebugRestoreBtn];
         TPDebugRestoreWindow.hidden = YES;
 
         TPDebugWindow.hidden = NO;
-        [TPDebugWindow makeKeyAndVisible];
 
-        TPLog(@"v6 overlay ready");
-        TPLog(@"plugin enabled=%d", TPFakeVIPEnabled());
-        TPLog(@"login -> watch json-post-decrypt / decrypt-bypass");
+            TPLog(@"v7 overlay ready");
+            TPLog(@"enabled=%d — login then check json-post-decrypt", TPFakeVIPEnabled());
+        } @catch (NSException *e) {
+            TPLog(@"overlay failed: %@", e);
+        }
     });
 }
 
@@ -262,6 +290,12 @@ static NSData *TPJSONData(id obj) {
 static id TPJSONParse(NSData *data) {
     if (!data.length) return nil;
     @try {
+        if (TPOrig_JSONObjectWithData && !TPInJSONHook) {
+            id (*orig)(id, SEL, NSData *, NSJSONReadingOptions, NSError **) =
+                (id (*)(id, SEL, NSData *, NSJSONReadingOptions, NSError **))TPOrig_JSONObjectWithData;
+            return orig((id)[NSJSONSerialization class], @selector(JSONObjectWithData:options:error:),
+                        data, NSJSONReadingMutableContainers, nil);
+        }
         return [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil];
     } @catch (__unused NSException *e) {
         return nil;
@@ -500,8 +534,8 @@ static NSData *TPFakePayloadForURL(NSURL *url) {
 static void TPSeedLocalUnlockCaches(void) {
     @try {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setObject:TPKnownDialIDs() forKey:kDialUnlockKey];
-        [ud setObject:TPKnownEffectIDs() forKey:kEffectUnlockKey];
+        TPUDSetOrig(ud, TPKnownDialIDs(), kDialUnlockKey);
+        TPUDSetOrig(ud, TPKnownEffectIDs(), kEffectUnlockKey);
     } @catch (__unused NSException *e) {}
 }
 
@@ -615,13 +649,15 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
 
 #pragma mark - NSJSONSerialization hook (post-decrypt)
 
-static IMP TPOrig_JSONObjectWithData = NULL;
-
 static id TPHook_JSONObjectWithData(id self, SEL _cmd, NSData *data, NSJSONReadingOptions opts, NSError **error) {
     id (*orig)(id, SEL, NSData *, NSJSONReadingOptions, NSError **) =
         (id (*)(id, SEL, NSData *, NSJSONReadingOptions, NSError **))TPOrig_JSONObjectWithData;
+    if (TPInJSONHook) return orig(self, _cmd, data, opts, error);
+    TPInJSONHook = 1;
     id result = orig(self, _cmd, data, opts, error);
-    return TPPatchParsedJSONObject(result);
+    id patched = TPPatchParsedJSONObject(result);
+    TPInJSONHook = 0;
+    return patched;
 }
 
 static void TPInstallJSONHooks(void) {
@@ -640,36 +676,47 @@ static void TPInstallJSONHooks(void) {
 
 #pragma mark - UserDefaults guard (dial unlock keys only)
 
-static IMP TPOrig_UD_objectForKey = NULL;
-static IMP TPOrig_UD_setObjectForKey = NULL;
+static void TPUDSetOrig(NSUserDefaults *ud, id value, NSString *key) {
+    if (TPOrig_UD_setObjectForKey) {
+        void (*orig)(id, SEL, id, NSString *) = (void (*)(id, SEL, id, NSString *))TPOrig_UD_setObjectForKey;
+        orig(ud, @selector(setObject:forKey:), value, key);
+    } else {
+        [ud setObject:value forKey:key];
+    }
+}
 
 static id TPHook_UD_objectForKey(id self, SEL _cmd, NSString *key) {
     id (*orig)(id, SEL, NSString *) = (id (*)(id, SEL, NSString *))TPOrig_UD_objectForKey;
-    if (TPFakeVIPEnabled()) {
+    if (TPInUDHook) return orig(self, _cmd, key);
+    TPInUDHook = 1;
+    id val = orig(self, _cmd, key);
+    if (TPGloballyEnabled) {
         if ([key isEqualToString:kDialUnlockKey]) {
-            id val = orig(self, _cmd, key);
-            NSArray *merged = TPMergedDialList(val);
-            TPLog(@"defaults-read dial ids=%lu", (unsigned long)merged.count);
-            return merged;
-        }
-        if ([key isEqualToString:kEffectUnlockKey]) {
-            return TPKnownEffectIDs();
+            val = TPMergedDialList(val);
+        } else if ([key isEqualToString:kEffectUnlockKey]) {
+            val = TPKnownEffectIDs();
         }
     }
-    return orig(self, _cmd, key);
+    TPInUDHook = 0;
+    return val;
 }
 
 static void TPHook_UD_setObjectForKey(id self, SEL _cmd, id value, NSString *key) {
     void (*orig)(id, SEL, id, NSString *) = (void (*)(id, SEL, id, NSString *))TPOrig_UD_setObjectForKey;
-    if (TPFakeVIPEnabled()) {
+    if (TPInUDHook) {
+        orig(self, _cmd, value, key);
+        return;
+    }
+    TPInUDHook = 1;
+    if (TPGloballyEnabled) {
         if ([key isEqualToString:kDialUnlockKey]) {
             value = TPMergedDialList(value);
-            TPLog(@"defaults-write dial ids=%lu", (unsigned long)[(NSArray *)value count]);
         } else if ([key isEqualToString:kEffectUnlockKey]) {
             value = TPKnownEffectIDs();
         }
     }
     orig(self, _cmd, value, key);
+    TPInUDHook = 0;
 }
 
 static void TPInstallUserDefaultsHooks(void) {
@@ -780,14 +827,16 @@ __attribute__((constructor)) static void TPFakeVIPInit(void) {
             TPDebugLines = [NSMutableArray array];
         }
 
-        TPSeedLocalUnlockCaches();
-        TPStartPeriodicReseed();
+        TPRefreshConfigFlags();
         TPInstallNSURLSessionHooks();
         TPInstallJSONHooks();
         TPInstallUserDefaultsHooks();
+
+        TPSeedLocalUnlockCaches();
+        TPStartPeriodicReseed();
         TPInstallDebugOverlay();
 
-        TPLog(@"v6 loaded enabled=%d overlay=on", TPFakeVIPEnabled());
+        TPLog(@"v7 loaded enabled=%d panel=%d", TPGloballyEnabled, TPDebugPanelOn);
         TPLog(@"hooks: session=%d json=%d defaults=%d",
               TPOrig_dataTaskRequest != NULL,
               TPOrig_JSONObjectWithData != NULL,
