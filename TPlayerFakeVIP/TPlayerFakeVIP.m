@@ -13,6 +13,7 @@ static NSString *const kDialUnlockKey = @"dashboard_unlocked_dial_ids";
 static NSString *const kEffectUnlockKey = @"dashboard_acceleration_effect_unlocked_ids";
 
 static UIWindow *TPDebugWindow = nil;
+static UIWindow *TPDebugRestoreWindow = nil;
 static UITextView *TPDebugTextView = nil;
 static UIButton *TPDebugRestoreBtn = nil;
 static NSMutableArray<NSString *> *TPDebugLines = nil;
@@ -101,8 +102,6 @@ static void TPDebugHandlePan(UIPanGestureRecognizer *gr) {
         TPDebugWindow.frame = f;
     }
 }
-
-static UIWindow *TPDebugRestoreWindow = nil;
 
 @interface TPDebugActions : NSObject
 - (void)clearTapped;
