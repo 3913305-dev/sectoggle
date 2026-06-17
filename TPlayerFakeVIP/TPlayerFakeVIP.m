@@ -122,9 +122,7 @@ static void TPInstallFloatToggle(void) {
             label.font = [UIFont boldSystemFontOfSize:13];
             [root addSubview:label];
 
-            TPFloatSwitch = [[UISwitch alloc] initWithFrame:CGRectZero];
-            TPFloatSwitch.transform = CGAffineTransformMakeScale(0.82, 0.82);
-            TPFloatSwitch.center = CGPointMake(w - 30, h * 0.5);
+            TPFloatSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(w - 58, 6, 51, 31)];
             TPFloatSwitch.onTintColor = [UIColor colorWithRed:0.2 green:0.78 blue:0.35 alpha:1];
             TPFloatSwitch.on = TPGloballyEnabled;
             [TPFloatSwitch addTarget:actions action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];

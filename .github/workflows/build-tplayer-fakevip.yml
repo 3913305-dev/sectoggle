@@ -29,7 +29,7 @@ jobs:
             -miphoneos-version-min=14.0 > build.log 2>&1; then
             echo "=== build failed ==="
             cat build.log
-            grep -E 'error:|warning:' build.log | head -20 | while IFS= read -r line; do
+            grep -E 'error:|warning:|Undefined symbols|ld: symbol' build.log | head -30 | while IFS= read -r line; do
               echo "::error title=clang::$line"
             done
             exit 1
