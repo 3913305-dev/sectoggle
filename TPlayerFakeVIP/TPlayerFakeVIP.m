@@ -1,18 +1,226 @@
-// TPlayerFakeVIP v5 — post-decrypt JSON merge + UserDefaults unlock guard.
+// TPlayerFakeVIP v6 — v5 + on-screen floating debug log panel.
 // Inject via TrollFools into com.twanjia.teslaplayer
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 static NSString *const kBundleID = @"com.twanjia.teslaplayer";
 static NSString *const kEnabledKey = @"tp_fake_vip.enabled";
+static NSString *const kDebugPanelKey = @"tp_fake_vip.debug_panel";
 static NSString *const kLogTag = @"[TPlayerFakeVIP]";
 static NSString *const kDialUnlockKey = @"dashboard_unlocked_dial_ids";
 static NSString *const kEffectUnlockKey = @"dashboard_acceleration_effect_unlocked_ids";
 
+static UIWindow *TPDebugWindow = nil;
+static UITextView *TPDebugTextView = nil;
+static UIButton *TPDebugRestoreBtn = nil;
+static NSMutableArray<NSString *> *TPDebugLines = nil;
+static dispatch_queue_t TPDebugQueue = NULL;
+static CGPoint TPDebugDragStart = {0, 0};
+
+static id TPJSONParse(NSData *data);
+static NSString *TPShortURL(NSURL *url);
+static NSString *TPPeekEncrypted(NSData *data);
+static void TPLog(NSString *fmt, ...);
+static void TPInstallDebugOverlay(void);
+
 static BOOL TPFakeVIPEnabled(void) {
     if ([[NSUserDefaults standardUserDefaults] objectForKey:kEnabledKey] == nil) return YES;
     return [[NSUserDefaults standardUserDefaults] boolForKey:kEnabledKey];
+}
+
+static BOOL TPDebugPanelEnabled(void) {
+    if ([[NSUserDefaults standardUserDefaults] objectForKey:kDebugPanelKey] == nil) return YES;
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kDebugPanelKey];
+}
+
+static NSString *TPTimeStamp(void) {
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"HH:mm:ss";
+    return [f stringFromDate:[NSDate date]] ?: @"??:??:??";
+}
+
+static void TPDebugRefreshText(void) {
+    if (!TPDebugTextView || !TPDebugLines) return;
+    TPDebugTextView.text = [TPDebugLines componentsJoinedByString:@"\n"];
+    if (TPDebugTextView.text.length) {
+        NSRange bottom = NSMakeRange(TPDebugTextView.text.length - 1, 1);
+        [TPDebugTextView scrollRangeToVisible:bottom];
+    }
+}
+
+static void TPLog(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *body = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+
+    NSString *line = [NSString stringWithFormat:@"%@ %@", TPTimeStamp(), body];
+    NSLog(@"%@ %@", kLogTag, line);
+
+    if (!TPDebugPanelEnabled() || !TPDebugQueue || !TPDebugLines) return;
+    dispatch_async(TPDebugQueue, ^{
+        [TPDebugLines addObject:line];
+        while (TPDebugLines.count > 400) {
+            [TPDebugLines removeObjectAtIndex:0];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TPDebugRefreshText();
+        });
+    });
+}
+
+static void TPHideDebugPanel(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        TPDebugWindow.hidden = YES;
+        if (TPDebugRestoreWindow) TPDebugRestoreWindow.hidden = NO;
+        TPLog(@"panel hidden (tap D to restore)");
+    });
+}
+
+static void TPShowDebugPanel(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (TPDebugRestoreWindow) TPDebugRestoreWindow.hidden = YES;
+        if (TPDebugWindow) {
+            TPDebugWindow.hidden = NO;
+            [TPDebugWindow makeKeyAndVisible];
+        }
+    });
+}
+
+static void TPDebugHandlePan(UIPanGestureRecognizer *gr) {
+    if (!TPDebugWindow) return;
+    if (gr.state == UIGestureRecognizerStateBegan) {
+        TPDebugDragStart = TPDebugWindow.frame.origin;
+    } else if (gr.state == UIGestureRecognizerStateChanged) {
+        CGPoint t = [gr translationInView:TPDebugWindow];
+        CGRect f = TPDebugWindow.frame;
+        f.origin.x = TPDebugDragStart.x + t.x;
+        f.origin.y = TPDebugDragStart.y + t.y;
+        TPDebugWindow.frame = f;
+    }
+}
+
+static UIWindow *TPDebugRestoreWindow = nil;
+
+@interface TPDebugActions : NSObject
+- (void)clearTapped;
+- (void)hideTapped;
+- (void)restoreTapped;
+- (void)handlePan:(UIPanGestureRecognizer *)gr;
+@end
+
+@implementation TPDebugActions
+- (void)clearTapped {
+    dispatch_async(TPDebugQueue, ^{
+        [TPDebugLines removeAllObjects];
+        dispatch_async(dispatch_get_main_queue(), ^{ TPDebugRefreshText(); });
+    });
+}
+- (void)hideTapped { TPHideDebugPanel(); }
+- (void)restoreTapped { TPShowDebugPanel(); }
+- (void)handlePan:(UIPanGestureRecognizer *)gr { TPDebugHandlePan(gr); }
+@end
+
+static void TPInstallDebugOverlay(void) {
+    if (!TPDebugPanelEnabled()) return;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (TPDebugWindow) return;
+
+        TPDebugActions *actions = [TPDebugActions new];
+
+        CGFloat w = 300, h = 220;
+        TPDebugWindow = [[UIWindow alloc] initWithFrame:CGRectMake(10, 90, w, h)];
+        TPDebugWindow.windowLevel = UIWindowLevelStatusBar + 50;
+        TPDebugWindow.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
+        TPDebugWindow.layer.cornerRadius = 10;
+        TPDebugWindow.clipsToBounds = YES;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    TPDebugWindow.windowScene = (UIWindowScene *)scene;
+                    break;
+                }
+            }
+        }
+
+        UIView *root = [[UIView alloc] initWithFrame:TPDebugWindow.bounds];
+        root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [TPDebugWindow addSubview:root];
+
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, w - 16, 18)];
+        title.text = @"FakeVIP Debug (drag)";
+        title.textColor = UIColor.greenColor;
+        title.font = [UIFont boldSystemFontOfSize:12];
+        [root addSubview:title];
+
+        TPDebugTextView = [[UITextView alloc] initWithFrame:CGRectMake(4, 24, w - 8, h - 56)];
+        TPDebugTextView.backgroundColor = UIColor.clearColor;
+        TPDebugTextView.textColor = UIColor.whiteColor;
+        TPDebugTextView.font = [UIFont fontWithName:@"Menlo" size:9] ?: [UIFont systemFontOfSize:9];
+        TPDebugTextView.editable = NO;
+        TPDebugTextView.selectable = YES;
+        TPDebugTextView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [root addSubview:TPDebugTextView];
+
+        UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        clearBtn.frame = CGRectMake(4, h - 28, 52, 24);
+        [clearBtn setTitle:@"Clear" forState:UIControlStateNormal];
+        clearBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+        [clearBtn addTarget:actions action:@selector(clearTapped) forControlEvents:UIControlEventTouchUpInside];
+        [root addSubview:clearBtn];
+
+        UIButton *hideBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        hideBtn.frame = CGRectMake(60, h - 28, 52, 24);
+        [hideBtn setTitle:@"Hide" forState:UIControlStateNormal];
+        hideBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+        [hideBtn addTarget:actions action:@selector(hideTapped) forControlEvents:UIControlEventTouchUpInside];
+        [root addSubview:hideBtn];
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:actions action:@selector(handlePan:)];
+        [root addGestureRecognizer:pan];
+        objc_setAssociatedObject(TPDebugWindow, "actions", actions, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        TPDebugRestoreWindow = [[UIWindow alloc] initWithFrame:CGRectMake(10, 60, 30, 30)];
+        TPDebugRestoreWindow.windowLevel = UIWindowLevelStatusBar + 60;
+        TPDebugRestoreWindow.backgroundColor = UIColor.clearColor;
+        if (@available(iOS 13.0, *)) TPDebugRestoreWindow.windowScene = TPDebugWindow.windowScene;
+
+        TPDebugRestoreBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        TPDebugRestoreBtn.frame = TPDebugRestoreWindow.bounds;
+        TPDebugRestoreBtn.backgroundColor = [[UIColor greenColor] colorWithAlphaComponent:0.9];
+        TPDebugRestoreBtn.layer.cornerRadius = 15;
+        [TPDebugRestoreBtn setTitle:@"D" forState:UIControlStateNormal];
+        TPDebugRestoreBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+        [TPDebugRestoreBtn addTarget:actions action:@selector(restoreTapped) forControlEvents:UIControlEventTouchUpInside];
+        [TPDebugRestoreWindow addSubview:TPDebugRestoreBtn];
+        TPDebugRestoreWindow.hidden = YES;
+
+        TPDebugWindow.hidden = NO;
+        [TPDebugWindow makeKeyAndVisible];
+
+        TPLog(@"v6 overlay ready");
+        TPLog(@"plugin enabled=%d", TPFakeVIPEnabled());
+        TPLog(@"login -> watch json-post-decrypt / decrypt-bypass");
+    });
+}
+
+static NSString *TPShortURL(NSURL *url) {
+    if (!url) return @"(nil)";
+    NSString *s = url.absoluteString;
+    NSRange r = [s rangeOfString:@"teslaapi.twanjia.com"];
+    if (r.location != NSNotFound) return [s substringFromIndex:r.location];
+    return s.length > 80 ? [[s substringToIndex:80] stringByAppendingString:@"…"] : s;
+}
+
+static NSString *TPPeekEncrypted(NSData *data) {
+    id o = TPJSONParse(data);
+    if ([o isKindOfClass:[NSDictionary class]]) {
+        return [o[@"encrypted"] boolValue] ? @"enc=Y" : @"enc=N";
+    }
+    return @"enc=?";
 }
 
 #pragma mark - Known unlock IDs
@@ -213,7 +421,7 @@ static id TPPatchParsedJSONObject(id result) {
         NSMutableDictionary *root = [(NSDictionary *)result mutableCopy];
         TPMergeEntitlementsIntoDict(root);
         TPMergeEntitlementsIntoDict(TPMutablePayloadContainer(root));
-        NSLog(@"%@ json-post-decrypt merge", kLogTag);
+        TPLog(@"json-post-decrypt merge");
         TPScheduleReseedBurst();
         return root;
     } @catch (__unused NSException *e) {}
@@ -346,7 +554,7 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
             }
             NSData *fake = TPFakePayloadForURL(url);
             if (fake) {
-                NSLog(@"%@ decrypt-bypass url=%@", kLogTag, url.absoluteString);
+                TPLog(@"decrypt-bypass %@", TPShortURL(url));
                 TPScheduleReseedBurst();
                 return fake;
             }
@@ -358,7 +566,7 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
 
         if (TPIsAuthURL(url)) {
             if (encrypted) {
-                NSLog(@"%@ auth-encrypted pass-through (json-hook handles decrypt) url=%@", kLogTag, url.absoluteString);
+                TPLog(@"auth-encrypted pass-through %@", TPShortURL(url));
                 return data;
             }
             TPMergeEntitlementsIntoDict(root);
@@ -366,7 +574,7 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
             root[@"encrypted"] = @NO;
             NSData *out = TPJSONData(root);
             if (out) {
-                NSLog(@"%@ auth-merge url=%@", kLogTag, url.absoluteString);
+                TPLog(@"auth-merge %@", TPShortURL(url));
                 TPScheduleReseedBurst();
                 return out;
             }
@@ -376,7 +584,7 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
         if (encrypted) {
             NSData *fake = TPFakePayloadForURL(url);
             if (fake) {
-                NSLog(@"%@ decrypt-bypass url=%@", kLogTag, url.absoluteString);
+                TPLog(@"decrypt-bypass %@", TPShortURL(url));
                 TPScheduleReseedBurst();
                 return fake;
             }
@@ -394,13 +602,13 @@ static NSData *TPPatchResponseData(NSURL *url, NSData *data) {
             root[@"encrypted"] = @NO;
             NSData *out = TPJSONData(root);
             if (out) {
-                NSLog(@"%@ patch-json url=%@", kLogTag, url.absoluteString);
+                TPLog(@"patch-json %@", TPShortURL(url));
                 TPScheduleReseedBurst();
                 return out;
             }
         }
     } @catch (NSException *e) {
-        NSLog(@"%@ patch exception url=%@ err=%@", kLogTag, url.absoluteString, e);
+        TPLog(@"patch exception %@ err=%@", TPShortURL(url), e);
     }
 
     return data;
@@ -427,6 +635,7 @@ static void TPInstallJSONHooks(void) {
     if (m && !TPOrig_JSONObjectWithData) {
         TPOrig_JSONObjectWithData = method_getImplementation(m);
         method_setImplementation(m, (IMP)TPHook_JSONObjectWithData);
+        TPLog(@"hook OK NSJSONSerialization");
     }
 }
 
@@ -441,7 +650,7 @@ static id TPHook_UD_objectForKey(id self, SEL _cmd, NSString *key) {
         if ([key isEqualToString:kDialUnlockKey]) {
             id val = orig(self, _cmd, key);
             NSArray *merged = TPMergedDialList(val);
-            NSLog(@"%@ defaults-read dial ids count=%lu", kLogTag, (unsigned long)merged.count);
+            TPLog(@"defaults-read dial ids=%lu", (unsigned long)merged.count);
             return merged;
         }
         if ([key isEqualToString:kEffectUnlockKey]) {
@@ -456,7 +665,7 @@ static void TPHook_UD_setObjectForKey(id self, SEL _cmd, id value, NSString *key
     if (TPFakeVIPEnabled()) {
         if ([key isEqualToString:kDialUnlockKey]) {
             value = TPMergedDialList(value);
-            NSLog(@"%@ defaults-write dial ids count=%lu", kLogTag, (unsigned long)[(NSArray *)value count]);
+            TPLog(@"defaults-write dial ids=%lu", (unsigned long)[(NSArray *)value count]);
         } else if ([key isEqualToString:kEffectUnlockKey]) {
             value = TPKnownEffectIDs();
         }
@@ -472,12 +681,14 @@ static void TPInstallUserDefaultsHooks(void) {
     if (m1 && !TPOrig_UD_objectForKey) {
         TPOrig_UD_objectForKey = method_getImplementation(m1);
         method_setImplementation(m1, (IMP)TPHook_UD_objectForKey);
+        TPLog(@"hook OK UserDefaults objectForKey");
     }
 
     Method m2 = class_getInstanceMethod(cls, @selector(setObject:forKey:));
     if (m2 && !TPOrig_UD_setObjectForKey) {
         TPOrig_UD_setObjectForKey = method_getImplementation(m2);
         method_setImplementation(m2, (IMP)TPHook_UD_setObjectForKey);
+        TPLog(@"hook OK UserDefaults setObject");
     }
 }
 
@@ -491,7 +702,18 @@ static IMP TPOrig_dataTaskURL = NULL;
 static void TPInvokeCompletion(TPCompletion completion, NSURL *url, NSData *data, NSURLResponse *resp, NSError *err) {
     if (!completion) return;
     @try {
+        if (url && TPURLHas(url, @"teslaapi.twanjia.com")) {
+            TPLog(@"NET %@ %luB %@ hook=%d err=%@",
+                  TPShortURL(url),
+                  (unsigned long)data.length,
+                  TPPeekEncrypted(data),
+                  TPShouldPatchURL(url),
+                  err.localizedDescription ?: @"-");
+        }
         NSData *patched = TPPatchResponseData(url, data);
+        if (patched != data && url) {
+            TPLog(@"NET patched %@", TPShortURL(url));
+        }
         completion(patched, resp, err);
     } @catch (__unused NSException *e) {
         completion(data, resp, err);
@@ -536,6 +758,7 @@ static void TPInstallNSURLSessionHooks(void) {
     if (m1 && !TPOrig_dataTaskRequest) {
         TPOrig_dataTaskRequest = method_getImplementation(m1);
         method_setImplementation(m1, (IMP)TPHook_dataTaskWithRequest);
+        TPLog(@"hook OK NSURLSession dataTaskWithRequest");
     }
 
     SEL s2 = @selector(dataTaskWithURL:completionHandler:);
@@ -543,6 +766,7 @@ static void TPInstallNSURLSessionHooks(void) {
     if (m2 && !TPOrig_dataTaskURL) {
         TPOrig_dataTaskURL = method_getImplementation(m2);
         method_setImplementation(m2, (IMP)TPHook_dataTaskWithURL);
+        TPLog(@"hook OK NSURLSession dataTaskWithURL");
     }
 }
 
@@ -552,14 +776,24 @@ __attribute__((constructor)) static void TPFakeVIPInit(void) {
     @try {
         if (![[NSBundle mainBundle].bundleIdentifier isEqualToString:kBundleID]) return;
 
+        if (!TPDebugQueue) {
+            TPDebugQueue = dispatch_queue_create("com.tplayer.fakevip.debuglog", DISPATCH_QUEUE_SERIAL);
+            TPDebugLines = [NSMutableArray array];
+        }
+
         TPSeedLocalUnlockCaches();
         TPStartPeriodicReseed();
         TPInstallNSURLSessionHooks();
         TPInstallJSONHooks();
         TPInstallUserDefaultsHooks();
+        TPInstallDebugOverlay();
 
-        NSLog(@"%@ v5 loaded enabled=%d (json-post-decrypt + defaults-guard)", kLogTag, TPFakeVIPEnabled());
+        TPLog(@"v6 loaded enabled=%d overlay=on", TPFakeVIPEnabled());
+        TPLog(@"hooks: session=%d json=%d defaults=%d",
+              TPOrig_dataTaskRequest != NULL,
+              TPOrig_JSONObjectWithData != NULL,
+              TPOrig_UD_objectForKey != NULL);
     } @catch (NSException *e) {
-        NSLog(@"%@ init failed: %@", kLogTag, e);
+        TPLog(@"init failed: %@", e);
     }
 }
