@@ -1,0 +1,8 @@
+Package: com.twanjia.tplayerfakevip
+Name: TPlayerFakeVIP
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: TPlayer 内测假 VIP 插件 — 登录后跳过会员/表盘校验（仅 com.twanjia.teslaplayer）
+Maintainer: twanjia-dev
+Author: twanjia-dev
+Section: Tweaks

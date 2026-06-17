@@ -1,6 +1,10 @@
 # iOS build output
 tools/ios-license/build/
 tools/ios-license/SEC授权工具*.ipa
+TPlayerFakeVIP/TPlayerFakeVIP.dylib
+TPlayerFakeVIP/build.log
+SecToggle/SecToggle.dylib
+SecToggle/build.log
 
 # Generated app icon (CI regenerates)
 tools/ios-license/SijiLicenseTool/Assets.xcassets/AppIcon.appiconset/AppIcon-*.png
