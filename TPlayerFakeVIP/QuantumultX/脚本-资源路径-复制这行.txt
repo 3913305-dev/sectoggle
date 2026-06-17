@@ -1,0 +1,4 @@
+# 圈 X → 设置 → 脚本 → + → 引用 →「资源路径」
+# 复制下面【一整行】粘贴
+
+https://raw.githubusercontent.com/3913305-dev/sectoggle/main/TPlayerFakeVIP/QuantumultX/tplayer_fakevip.js, tag=tplayer_fakevip.js, enabled=true
